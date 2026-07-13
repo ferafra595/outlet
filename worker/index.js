@@ -323,7 +323,7 @@ async function api(request, env, path) {
 
   if (path === '/api/commissions' && method === 'GET') {
     if(!admin) return json({error:'Solo amministratore'},403);
-    const rows=(await env.DB.prepare(`SELECT m.period,ROUND(m.gross-COALESCE(r.returns_amount,0),2) revenue,ROUND(m.gross,2) gross_revenue,ROUND(COALESCE(r.returns_amount,0),2) returns_amount FROM (SELECT strftime('%Y-%m',occurred_at) period,SUM(total) gross FROM sales WHERE status='completed' GROUP BY period) m LEFT JOIN (SELECT strftime('%Y-%m',created_at) period,SUM(amount) returns_amount FROM returns WHERE COALESCE(status,'registered')='registered' GROUP BY period) r ON r.period=m.period ORDER BY m.period DESC`).all()).results;
+    const rows=(await env.DB.prepare(`SELECT m.period,ROUND(m.gross-COALESCE(r.returns_amount,0),2) revenue,ROUND(m.gross,2) gross_revenue,ROUND(COALESCE(r.returns_amount,0),2) returns_amount,m.sales_count FROM (SELECT strftime('%Y-%m',occurred_at) period,SUM(total) gross,COUNT(*) sales_count FROM sales WHERE status='completed' GROUP BY period) m LEFT JOIN (SELECT strftime('%Y-%m',created_at) period,SUM(amount) returns_amount FROM returns WHERE COALESCE(status,'registered')='registered' GROUP BY period) r ON r.period=m.period ORDER BY m.period DESC`).all()).results;
     const pays=(await env.DB.prepare(`SELECT * FROM commission_payments`).all()).results; const map=Object.fromEntries(pays.map(x=>[x.period,x]));
     return json(rows.map(r=>({...r,commission:commissionFor(r.revenue),paid:map[r.period]?.amount||0,paid_at:map[r.period]?.paid_at||null,due:money(commissionFor(r.revenue)-(map[r.period]?.amount||0))})));
   }
