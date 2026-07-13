@@ -365,7 +365,7 @@ const PRODUCT_CATEGORIES=[
 ];
 const COMMON_BRANDS=[
   'Adidas','Armani Exchange','Calvin Klein','Colmar','Diesel','Emporio Armani','Fila',
-  'Fred Perry','Guess','Hugo Boss','Jack & Jones','Lacoste','Levi's','Liu Jo','Moncler',
+  'Fred Perry','Guess','Hugo Boss','Jack & Jones','Lacoste',"Levi's",'Liu Jo','Moncler',
   'Nike','Only','Peuterey','Puma','Ralph Lauren','Replay','Tommy Hilfiger',
   'Under Armour','Vans','Versace Jeans Couture'
 ];
