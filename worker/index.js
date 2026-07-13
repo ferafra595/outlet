@@ -52,6 +52,28 @@ async function notify(env, subject, html) {
   }).catch(() => null);
 }
 
+async function cancelSaleRecord(env,id,reason){
+  const sale=await env.DB.prepare(`SELECT * FROM sales WHERE id=?`).bind(id).first();
+  if(!sale || sale.status!=='completed') return {ok:false,reversed_amount:0,sale:null};
+  const items=(await env.DB.prepare(`SELECT si.*,p.current_qty,p.deleted_at FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?`).bind(id).all()).results;
+  for(const x of items){
+    const alreadyReturned=Math.max(0,Number(x.returned_qty)||0);
+    const toRestore=Math.max(0,(Number(x.quantity)||0)-alreadyReturned);
+    if(toRestore<=0) continue;
+    const previousQty=Number(x.current_qty)||0;
+    const nq=previousQty+toRestore;
+    const nextStatus=x.deleted_at ? 'deleted' : (nq>0?'available':'out_of_stock');
+    await env.DB.prepare(`UPDATE products SET current_qty=?,sold_qty=MAX(0,sold_qty-?),status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .bind(nq,toRestore,nextStatus,x.product_id).run();
+    await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,reference_type,reference_id,note) VALUES(?,?,?,?,?,?,?,?)`)
+      .bind(x.product_id,'sale_cancel',toRestore,previousQty,nq,'sale',id,reason).run();
+  }
+  await env.DB.prepare(`UPDATE returns SET status='voided_by_sale_cancel' WHERE sale_id=? AND COALESCE(status,'registered')='registered'`).bind(id).run();
+  await env.DB.prepare(`UPDATE sales SET status='cancelled',cancelled_at=CURRENT_TIMESTAMP,cancellation_reason=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(reason,id).run();
+  await audit(env,'admin','delete','sale',id,{reason,reversed_amount:sale.total,sale_code:sale.sale_code});
+  return {ok:true,reversed_amount:money(sale.total),sale};
+}
+
 async function api(request, env, path) {
   const method = request.method;
   const admin = await isAdmin(request, env);
@@ -188,8 +210,16 @@ async function api(request, env, path) {
         COALESCE((SELECT SUM(r.amount) FROM returns r WHERE r.sale_id=s.id AND COALESCE(r.status,'registered')='registered'),0) returned_amount,
         COALESCE((SELECT SUM(r.quantity) FROM returns r WHERE r.sale_id=s.id AND COALESCE(r.status,'registered')='registered'),0) returned_qty
       FROM sales s
+      WHERE s.status='completed'
       ORDER BY s.occurred_at DESC LIMIT 1000`).all();
     return json(rows.results);
+  }
+
+  if (path === '/api/sales-summary' && method === 'GET') {
+    const sales=await env.DB.prepare(`SELECT COALESCE(SUM(total),0) gross_revenue,COUNT(*) sales_count FROM sales WHERE status='completed'`).first();
+    const returns=await env.DB.prepare(`SELECT COALESCE(SUM(amount),0) returns_amount,COUNT(*) returns_count FROM returns WHERE COALESCE(status,'registered')='registered'`).first();
+    const gross=money(sales.gross_revenue); const returned=money(returns.returns_amount);
+    return json({gross_revenue:gross,returns_amount:returned,net_revenue:money(gross-returned),sales_count:sales.sales_count||0,returns_count:returns.returns_count||0});
   }
 
   const saleDetail = path.match(/^\/api\/sales\/(\d+)$/);
@@ -206,28 +236,27 @@ async function api(request, env, path) {
   if (cancelMatch && method === 'POST') {
     if (!admin) return json({error:'Solo amministratore'},403);
     const id=Number(cancelMatch[1]); const b=await readJson(request);
-    const sale=await env.DB.prepare(`SELECT * FROM sales WHERE id=?`).bind(id).first();
-    if(!sale || sale.status!=='completed') return json({error:'Transazione non eliminabile'},400);
     const reason=String(b.reason||'').trim();
     if(!reason) return json({error:'Inserisci il motivo dell’eliminazione'},400);
-    const items=(await env.DB.prepare(`SELECT si.*,p.current_qty,p.deleted_at FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?`).bind(id).all()).results;
-    for(const x of items){
-      const alreadyReturned=Math.max(0,Number(x.returned_qty)||0);
-      const toRestore=Math.max(0,(Number(x.quantity)||0)-alreadyReturned);
-      if(toRestore<=0) continue;
-      const previousQty=Number(x.current_qty)||0;
-      const nq=previousQty+toRestore;
-      const nextStatus=x.deleted_at ? 'deleted' : (nq>0?'available':'out_of_stock');
-      await env.DB.prepare(`UPDATE products SET current_qty=?,sold_qty=MAX(0,sold_qty-?),status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-        .bind(nq,toRestore,nextStatus,x.product_id).run();
-      await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,reference_type,reference_id,note) VALUES(?,?,?,?,?,?,?,?)`)
-        .bind(x.product_id,'sale_cancel',toRestore,previousQty,nq,'sale',id,reason).run();
+    const result=await cancelSaleRecord(env,id,reason);
+    if(!result.ok) return json({error:'Transazione non eliminabile'},400);
+    await notify(env,`Transazione eliminata ${result.sale.sale_code}`,`<p>Incasso stornato: € ${Number(result.sale.total).toFixed(2)}</p><p>Motivo: ${reason}</p>`);
+    return json({ok:true,reversed_amount:result.reversed_amount});
+  }
+
+  if (path === '/api/sales/bulk-cancel' && method === 'POST') {
+    if (!admin) return json({error:'Solo amministratore'},403);
+    const b=await readJson(request); const ids=[...new Set((Array.isArray(b.ids)?b.ids:[]).map(Number).filter(Number.isFinite))];
+    const reason=String(b.reason||'').trim();
+    if(!ids.length) return json({error:'Nessuna transazione selezionata'},400);
+    if(!reason) return json({error:'Inserisci il motivo dell’eliminazione'},400);
+    let deleted=0,reversed=0,codes=[];
+    for(const id of ids){
+      const result=await cancelSaleRecord(env,id,reason);
+      if(result.ok){deleted++;reversed+=Number(result.reversed_amount)||0;codes.push(result.sale.sale_code)}
     }
-    await env.DB.prepare(`UPDATE returns SET status='voided_by_sale_cancel' WHERE sale_id=? AND COALESCE(status,'registered')='registered'`).bind(id).run();
-    await env.DB.prepare(`UPDATE sales SET status='cancelled',cancelled_at=CURRENT_TIMESTAMP,cancellation_reason=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(reason,id).run();
-    await audit(env,'admin','delete','sale',id,{reason,reversed_amount:sale.total,sale_code:sale.sale_code});
-    await notify(env,`Transazione eliminata ${sale.sale_code}`,`<p>Incasso stornato: € ${Number(sale.total).toFixed(2)}</p><p>Motivo: ${reason}</p>`);
-    return json({ok:true,reversed_amount:money(sale.total)});
+    await notify(env,`${deleted} transazioni eliminate`,`<p>Incasso totale stornato: € ${money(reversed).toFixed(2)}</p><p>Vendite: ${codes.join(', ')}</p><p>Motivo: ${reason}</p>`);
+    return json({ok:true,deleted,reversed_amount:money(reversed),sale_codes:codes});
   }
 
   if (path === '/api/returns' && method === 'POST') {
