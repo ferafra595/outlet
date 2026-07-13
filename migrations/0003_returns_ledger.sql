@@ -1,0 +1,10 @@
+ALTER TABLE returns ADD COLUMN return_code TEXT;
+ALTER TABLE returns ADD COLUMN sale_code_snapshot TEXT;
+ALTER TABLE returns ADD COLUMN barcode_snapshot TEXT;
+ALTER TABLE returns ADD COLUMN product_snapshot TEXT;
+ALTER TABLE returns ADD COLUMN unit_refund_amount REAL NOT NULL DEFAULT 0;
+ALTER TABLE returns ADD COLUMN registered_by TEXT NOT NULL DEFAULT 'store';
+ALTER TABLE returns ADD COLUMN status TEXT NOT NULL DEFAULT 'registered';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_returns_return_code ON returns(return_code);
+CREATE INDEX IF NOT EXISTS idx_returns_sale_id ON returns(sale_id);
+CREATE INDEX IF NOT EXISTS idx_returns_created_at ON returns(created_at);
