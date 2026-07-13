@@ -95,6 +95,22 @@ async function api(request, env, path) {
   }
 
   const productMatch = path.match(/^\/api\/products\/(\d+)$/);
+  if (productMatch && method === 'DELETE') {
+    if (!admin) return json({ error: 'Solo amministratore' }, 403);
+    const id = Number(productMatch[1]);
+    const b = await readJson(request);
+    const product = await env.DB.prepare(`SELECT * FROM products WHERE id=? AND deleted_at IS NULL`).bind(id).first();
+    if (!product) return json({ error: 'Prodotto non trovato o già eliminato' }, 404);
+    const qty = Math.max(0, Number(product.current_qty) || 0);
+    if (qty > 0) {
+      await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,reference_type,reference_id,note) VALUES(?,?,?,?,?,?,?,?)`)
+        .bind(id,'admin_delete',-qty,qty,0,'product',id,b.reason || 'Articolo eliminato dal magazzino').run();
+    }
+    await env.DB.prepare(`UPDATE products SET current_qty=0,status='deleted',deleted_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(id).run();
+    await audit(env,'admin','delete','product',id,{ reason:b.reason || '', previous_qty:qty, barcode:product.barcode, internal_code:product.internal_code });
+    return json({ ok:true, removed_qty:qty });
+  }
+
   if (productMatch && method === 'PUT') {
     const id = Number(productMatch[1]); const b = await readJson(request);
     const old = await env.DB.prepare(`SELECT * FROM products WHERE id=?`).bind(id).first();
@@ -191,12 +207,27 @@ async function api(request, env, path) {
     if (!admin) return json({error:'Solo amministratore'},403);
     const id=Number(cancelMatch[1]); const b=await readJson(request);
     const sale=await env.DB.prepare(`SELECT * FROM sales WHERE id=?`).bind(id).first();
-    if(!sale || sale.status!=='completed') return json({error:'Vendita non annullabile'},400);
-    const items=(await env.DB.prepare(`SELECT si.*,p.current_qty FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?`).bind(id).all()).results;
-    for(const x of items){ const nq=x.current_qty+x.quantity; await env.DB.prepare(`UPDATE products SET current_qty=?,sold_qty=MAX(0,sold_qty-?),status='available',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(nq,x.quantity,x.product_id).run(); await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,reference_type,reference_id,note) VALUES(?,?,?,?,?,?,?,?)`).bind(x.product_id,'sale_cancel',x.quantity,x.current_qty,nq,'sale',id,b.reason||'Vendita annullata').run(); }
-    await env.DB.prepare(`UPDATE sales SET status='cancelled',cancelled_at=CURRENT_TIMESTAMP,cancellation_reason=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(b.reason||'',id).run();
-    await audit(env,'admin','cancel','sale',id,b); await notify(env,`Vendita annullata ${sale.sale_code}`,`<p>Importo stornato: € ${sale.total.toFixed(2)}</p>`);
-    return json({ok:true});
+    if(!sale || sale.status!=='completed') return json({error:'Transazione non eliminabile'},400);
+    const reason=String(b.reason||'').trim();
+    if(!reason) return json({error:'Inserisci il motivo dell’eliminazione'},400);
+    const items=(await env.DB.prepare(`SELECT si.*,p.current_qty,p.deleted_at FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?`).bind(id).all()).results;
+    for(const x of items){
+      const alreadyReturned=Math.max(0,Number(x.returned_qty)||0);
+      const toRestore=Math.max(0,(Number(x.quantity)||0)-alreadyReturned);
+      if(toRestore<=0) continue;
+      const previousQty=Number(x.current_qty)||0;
+      const nq=previousQty+toRestore;
+      const nextStatus=x.deleted_at ? 'deleted' : (nq>0?'available':'out_of_stock');
+      await env.DB.prepare(`UPDATE products SET current_qty=?,sold_qty=MAX(0,sold_qty-?),status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+        .bind(nq,toRestore,nextStatus,x.product_id).run();
+      await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,reference_type,reference_id,note) VALUES(?,?,?,?,?,?,?,?)`)
+        .bind(x.product_id,'sale_cancel',toRestore,previousQty,nq,'sale',id,reason).run();
+    }
+    await env.DB.prepare(`UPDATE returns SET status='voided_by_sale_cancel' WHERE sale_id=? AND COALESCE(status,'registered')='registered'`).bind(id).run();
+    await env.DB.prepare(`UPDATE sales SET status='cancelled',cancelled_at=CURRENT_TIMESTAMP,cancellation_reason=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(reason,id).run();
+    await audit(env,'admin','delete','sale',id,{reason,reversed_amount:sale.total,sale_code:sale.sale_code});
+    await notify(env,`Transazione eliminata ${sale.sale_code}`,`<p>Incasso stornato: € ${Number(sale.total).toFixed(2)}</p><p>Motivo: ${reason}</p>`);
+    return json({ok:true,reversed_amount:money(sale.total)});
   }
 
   if (path === '/api/returns' && method === 'POST') {
