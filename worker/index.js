@@ -165,7 +165,14 @@ async function api(request, env, path) {
   }
 
   if (path === '/api/sales' && method === 'GET') {
-    const rows = await env.DB.prepare(`SELECT s.*, COUNT(si.id) items_count, GROUP_CONCAT(COALESCE(p.barcode,p.internal_code)) product_barcodes FROM sales s LEFT JOIN sale_items si ON si.sale_id=s.id LEFT JOIN products p ON p.id=si.product_id GROUP BY s.id ORDER BY s.occurred_at DESC LIMIT 1000`).all();
+    const rows = await env.DB.prepare(`
+      SELECT s.*,
+        (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id=s.id) items_count,
+        (SELECT GROUP_CONCAT(COALESCE(p.barcode,p.internal_code)) FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=s.id) product_barcodes,
+        COALESCE((SELECT SUM(r.amount) FROM returns r WHERE r.sale_id=s.id AND COALESCE(r.status,'registered')='registered'),0) returned_amount,
+        COALESCE((SELECT SUM(r.quantity) FROM returns r WHERE r.sale_id=s.id AND COALESCE(r.status,'registered')='registered'),0) returned_qty
+      FROM sales s
+      ORDER BY s.occurred_at DESC LIMIT 1000`).all();
     return json(rows.results);
   }
 
@@ -174,8 +181,9 @@ async function api(request, env, path) {
     const id=Number(saleDetail[1]);
     const sale=await env.DB.prepare(`SELECT * FROM sales WHERE id=?`).bind(id).first();
     if(!sale) return json({error:'Vendita non trovata'},404);
-    const items=await env.DB.prepare(`SELECT si.*,p.name,p.brand,p.barcode,p.internal_code,p.size,p.color FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?`).bind(id).all();
-    return json({...sale,items:items.results});
+    const items=await env.DB.prepare(`SELECT si.*,p.name,p.model,p.brand,p.barcode,p.internal_code,p.size,p.color FROM sale_items si JOIN products p ON p.id=si.product_id WHERE si.sale_id=?`).bind(id).all();
+    const returns=await env.DB.prepare(`SELECT r.*,p.barcode,p.internal_code,p.brand,p.model,p.name FROM returns r LEFT JOIN products p ON p.id=r.product_id WHERE r.sale_id=? AND COALESCE(r.status,'registered')='registered' ORDER BY r.created_at DESC`).bind(id).all();
+    return json({...sale,items:items.results,returns:returns.results});
   }
 
   const cancelMatch = path.match(/^\/api\/sales\/(\d+)\/cancel$/);
@@ -192,18 +200,50 @@ async function api(request, env, path) {
   }
 
   if (path === '/api/returns' && method === 'POST') {
-    const b=await readJson(request); const item=await env.DB.prepare(`SELECT si.*,s.sale_code,s.status,p.current_qty FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id WHERE si.id=?`).bind(b.sale_item_id).first();
+    const b=await readJson(request);
+    const item=await env.DB.prepare(`
+      SELECT si.*,s.sale_code,s.status,p.current_qty,p.barcode,p.internal_code,p.brand,p.model,p.name,p.category,p.color,p.size
+      FROM sale_items si
+      JOIN sales s ON s.id=si.sale_id
+      JOIN products p ON p.id=si.product_id
+      WHERE si.id=?`).bind(b.sale_item_id).first();
     if(!item || item.status!=='completed') return json({error:'Articolo non restituibile'},400);
-    const qty=Math.max(1,parseInt(b.quantity||1)); if(item.returned_qty+qty>item.quantity) return json({error:'Quantità reso non valida'},400);
+    const qty=Math.max(1,parseInt(b.quantity||1));
+    if(item.returned_qty+qty>item.quantity) return json({error:'Quantità reso non valida'},400);
+    const reason=String(b.reason||'').trim();
+    if(!reason) return json({error:'Il motivo del reso è obbligatorio'},400);
     const amount=money(item.final_unit_price*qty);
-    const rr=await env.DB.prepare(`INSERT INTO returns(sale_id,sale_item_id,product_id,quantity,amount,reason) VALUES(?,?,?,?,?,?)`).bind(item.sale_id,item.id,item.product_id,qty,amount,b.reason||'').run();
+    const returnCode=uid('RES-');
+    const barcode=item.barcode||item.internal_code||'';
+    const productSnapshot=[item.brand,item.model||item.name,item.category,item.color,item.size].filter(Boolean).join(' · ');
+    const actor=admin?'admin':'store';
+    const rr=await env.DB.prepare(`
+      INSERT INTO returns(
+        sale_id,sale_item_id,product_id,quantity,amount,reason,
+        return_code,sale_code_snapshot,barcode_snapshot,product_snapshot,
+        unit_refund_amount,registered_by,status
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(item.sale_id,item.id,item.product_id,qty,amount,reason,returnCode,item.sale_code,barcode,productSnapshot,money(item.final_unit_price),actor,'registered').run();
     const nq=item.current_qty+qty;
     await env.DB.prepare(`UPDATE sale_items SET returned_qty=returned_qty+? WHERE id=?`).bind(qty,item.id).run();
     await env.DB.prepare(`UPDATE products SET current_qty=?,sold_qty=MAX(0,sold_qty-?),status='available',updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(nq,qty,item.product_id).run();
-    await env.DB.prepare(`UPDATE sales SET total=MAX(0,total-?),updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(amount,item.sale_id).run();
-    await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,reference_type,reference_id,note) VALUES(?,?,?,?,?,?,?,?)`).bind(item.product_id,'return',qty,item.current_qty,nq,'return',rr.meta.last_row_id,b.reason||`Reso ${item.sale_code}`).run();
-    await audit(env,admin?'admin':'store','create','return',rr.meta.last_row_id,{amount,qty}); await notify(env,`Nuovo reso ${item.sale_code}`,`<p>Importo stornato: € ${amount.toFixed(2)}</p>`);
-    return json({ok:true,amount});
+    // La vendita originale rimane immutata. Lo storno finanziario vive nel registro returns.
+    await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,reference_type,reference_id,note) VALUES(?,?,?,?,?,?,?,?)`)
+      .bind(item.product_id,'return',qty,item.current_qty,nq,'return',rr.meta.last_row_id,`${returnCode} · ${reason}`).run();
+    await audit(env,actor,'create','return',rr.meta.last_row_id,{returnCode,saleCode:item.sale_code,barcode,amount,qty,reason});
+    await notify(env,`Nuovo reso ${returnCode}`,`<p>Vendita origine: <strong>${item.sale_code}</strong></p><p>Barcode: ${barcode}</p><p>Importo stornato: <strong>€ ${amount.toFixed(2)}</strong></p>`);
+    return json({ok:true,id:rr.meta.last_row_id,return_code:returnCode,amount,sale_code:item.sale_code,barcode});
+  }
+
+  if (path === '/api/returns' && method === 'GET') {
+    const rows=await env.DB.prepare(`
+      SELECT r.*,s.sale_code,p.barcode,p.internal_code,p.brand,p.model,p.name,p.category,p.color,p.size
+      FROM returns r
+      JOIN sales s ON s.id=r.sale_id
+      LEFT JOIN products p ON p.id=r.product_id
+      WHERE COALESCE(r.status,'registered')='registered'
+      ORDER BY r.created_at DESC LIMIT 2000`).all();
+    return json(rows.results);
   }
 
   if (path === '/api/movements' && method === 'GET') {
@@ -212,18 +252,18 @@ async function api(request, env, path) {
 
   if (path === '/api/dashboard' && method === 'GET') {
     const inventory=await env.DB.prepare(`SELECT COUNT(*) product_types,COALESCE(SUM(current_qty),0) units,COALESCE(SUM(current_qty*cost_price),0) cost_value,COALESCE(SUM(current_qty*list_price),0) retail_value,SUM(CASE WHEN current_qty<=0 THEN 1 ELSE 0 END) out_of_stock FROM products WHERE deleted_at IS NULL`).first();
-    const month=await env.DB.prepare(`SELECT COALESCE(SUM(total),0) revenue,COUNT(*) sales FROM sales WHERE status='completed' AND strftime('%Y-%m',occurred_at)=strftime('%Y-%m','now')`).first();
-    const returns=await env.DB.prepare(`SELECT COALESCE(SUM(amount),0) amount FROM returns WHERE strftime('%Y-%m',created_at)=strftime('%Y-%m','now')`).first();
+    const month=await env.DB.prepare(`SELECT COALESCE(SUM(total),0) gross_revenue,COUNT(*) sales FROM sales WHERE status='completed' AND strftime('%Y-%m',occurred_at)=strftime('%Y-%m','now')`).first();
+    const returns=await env.DB.prepare(`SELECT COALESCE(SUM(amount),0) amount,COUNT(*) count FROM returns WHERE COALESCE(status,'registered')='registered' AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')`).first();
     const top=(await env.DB.prepare(`SELECT p.id,p.name,p.brand,SUM(si.quantity-si.returned_qty) qty,SUM(si.line_total-(si.returned_qty*si.final_unit_price)) revenue FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id WHERE s.status='completed' GROUP BY p.id ORDER BY qty DESC LIMIT 10`).all()).results;
     const stale=(await env.DB.prepare(`SELECT * FROM products WHERE current_qty>0 AND deleted_at IS NULL AND datetime(updated_at) < datetime('now','-90 days') ORDER BY updated_at ASC LIMIT 50`).all()).results;
-    const trend=(await env.DB.prepare(`SELECT strftime('%Y-%m',occurred_at) period,ROUND(SUM(total),2) revenue,COUNT(*) sales FROM sales WHERE status='completed' AND occurred_at>=datetime('now','-12 months') GROUP BY period ORDER BY period`).all()).results;
-    const revenue=money(month.revenue); const commission=commissionFor(revenue); const period=new Date().toISOString().slice(0,7); const paid=await env.DB.prepare(`SELECT amount,paid_at FROM commission_payments WHERE period=?`).bind(period).first();
-    return json({inventory,month:{...month,revenue,returns:money(returns.amount),commission,commission_due:money(commission-(paid?.amount||0)),paid:paid||null},top,stale,trend});
+    const trend=(await env.DB.prepare(`SELECT m.period,ROUND(m.gross-COALESCE(r.returns_amount,0),2) revenue,m.sales FROM (SELECT strftime('%Y-%m',occurred_at) period,SUM(total) gross,COUNT(*) sales FROM sales WHERE status='completed' AND occurred_at>=datetime('now','-12 months') GROUP BY period) m LEFT JOIN (SELECT strftime('%Y-%m',created_at) period,SUM(amount) returns_amount FROM returns WHERE COALESCE(status,'registered')='registered' GROUP BY period) r ON r.period=m.period ORDER BY m.period`).all()).results;
+    const grossRevenue=money(month.gross_revenue); const revenue=money(grossRevenue-(returns.amount||0)); const commission=commissionFor(revenue); const period=new Date().toISOString().slice(0,7); const paid=await env.DB.prepare(`SELECT amount,paid_at FROM commission_payments WHERE period=?`).bind(period).first();
+    return json({inventory,month:{...month,gross_revenue:grossRevenue,revenue,returns:money(returns.amount),returns_count:returns.count||0,commission,commission_due:money(commission-(paid?.amount||0)),paid:paid||null},top,stale,trend});
   }
 
   if (path === '/api/commissions' && method === 'GET') {
     if(!admin) return json({error:'Solo amministratore'},403);
-    const rows=(await env.DB.prepare(`SELECT strftime('%Y-%m',occurred_at) period,ROUND(SUM(total),2) revenue FROM sales WHERE status='completed' GROUP BY period ORDER BY period DESC`).all()).results;
+    const rows=(await env.DB.prepare(`SELECT m.period,ROUND(m.gross-COALESCE(r.returns_amount,0),2) revenue,ROUND(m.gross,2) gross_revenue,ROUND(COALESCE(r.returns_amount,0),2) returns_amount FROM (SELECT strftime('%Y-%m',occurred_at) period,SUM(total) gross FROM sales WHERE status='completed' GROUP BY period) m LEFT JOIN (SELECT strftime('%Y-%m',created_at) period,SUM(amount) returns_amount FROM returns WHERE COALESCE(status,'registered')='registered' GROUP BY period) r ON r.period=m.period ORDER BY m.period DESC`).all()).results;
     const pays=(await env.DB.prepare(`SELECT * FROM commission_payments`).all()).results; const map=Object.fromEntries(pays.map(x=>[x.period,x]));
     return json(rows.map(r=>({...r,commission:commissionFor(r.revenue),paid:map[r.period]?.amount||0,paid_at:map[r.period]?.paid_at||null,due:money(commissionFor(r.revenue)-(map[r.period]?.amount||0))})));
   }
