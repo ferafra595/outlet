@@ -335,6 +335,140 @@ async function api(request, env, path) {
 
   if (path === '/api/audit' && method === 'GET') { if(!admin) return json({error:'Solo amministratore'},403); const rows=await env.DB.prepare(`SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 2000`).all(); return json(rows.results); }
 
+
+  const productDetailMatch = path.match(/^\/api\/admin\/products\/(\d+)\/detail$/);
+  if (productDetailMatch && method === 'GET') {
+    if(!admin) return json({error:'Solo amministratore'},403);
+    const id=Number(productDetailMatch[1]);
+    const product=await env.DB.prepare(`SELECT * FROM products WHERE id=?`).bind(id).first();
+    if(!product) return json({error:'Prodotto non trovato'},404);
+    const movements=(await env.DB.prepare(`SELECT * FROM stock_movements WHERE product_id=? ORDER BY created_at DESC LIMIT 1000`).bind(id).all()).results;
+    const sales=(await env.DB.prepare(`SELECT s.sale_code,s.occurred_at,s.status,si.quantity,si.returned_qty,si.final_unit_price,si.line_total FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE si.product_id=? ORDER BY s.occurred_at DESC`).bind(id).all()).results;
+    const returns=(await env.DB.prepare(`SELECT r.*,s.sale_code FROM returns r JOIN sales s ON s.id=r.sale_id WHERE r.product_id=? AND COALESCE(r.status,'registered')='registered' ORDER BY r.created_at DESC`).bind(id).all()).results;
+    const stats=await env.DB.prepare(`SELECT COALESCE(SUM(CASE WHEN s.status='completed' THEN si.quantity ELSE 0 END),0) sold_qty,COALESCE(SUM(CASE WHEN s.status='completed' THEN si.line_total ELSE 0 END),0) gross_revenue,MAX(CASE WHEN s.status='completed' THEN s.occurred_at END) last_sale FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE si.product_id=?`).bind(id).first();
+    const returned=await env.DB.prepare(`SELECT COALESCE(SUM(quantity),0) qty,COALESCE(SUM(amount),0) amount FROM returns WHERE product_id=? AND COALESCE(status,'registered')='registered'`).bind(id).first();
+    return json({product,movements,sales,returns,stats:{...stats,returned_qty:returned.qty,returned_amount:returned.amount,net_revenue:money((stats.gross_revenue||0)-(returned.amount||0))}});
+  }
+
+  const duplicateMatch = path.match(/^\/api\/admin\/products\/(\d+)\/duplicate$/);
+  if (duplicateMatch && method === 'POST') {
+    if(!admin) return json({error:'Solo amministratore'},403);
+    const source=await env.DB.prepare(`SELECT * FROM products WHERE id=?`).bind(Number(duplicateMatch[1])).first();
+    if(!source) return json({error:'Prodotto non trovato'},404);
+    const b=await readJson(request); const qty=Math.max(0,parseInt(b.quantity||0)); const internal=uid('MB-');
+    try{
+      const r=await env.DB.prepare(`INSERT INTO products(barcode,internal_code,name,brand,category,model,color,size,season,notes,list_price,sale_price,cost_price,initial_qty,current_qty,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(b.barcode||null,internal,source.name,source.brand,source.category,source.model,b.color??source.color,b.size??source.size,source.season,b.notes??source.notes,money(b.list_price??source.list_price),money(b.sale_price??source.sale_price),money(source.cost_price),qty,qty,qty>0?'available':'out_of_stock').run();
+      if(qty>0) await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,note) VALUES(?,?,?,?,?,?)`).bind(r.meta.last_row_id,'initial_load',qty,0,qty,'Prodotto duplicato').run();
+      await audit(env,'admin','create','product',r.meta.last_row_id,{duplicated_from:source.id,barcode:b.barcode||null});
+      return json({ok:true,id:r.meta.last_row_id});
+    }catch(e){return json({error:e.message.includes('UNIQUE')?'Barcode già utilizzato':'Duplicazione non riuscita'},400)}
+  }
+
+  if (path === '/api/admin/trash' && method === 'GET') {
+    if(!admin) return json({error:'Solo amministratore'},403);
+    const rows=await env.DB.prepare(`SELECT * FROM products WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`).all();
+    return json(rows.results);
+  }
+  const restoreMatch=path.match(/^\/api\/admin\/products\/(\d+)\/restore$/);
+  if(restoreMatch && method==='POST'){
+    if(!admin) return json({error:'Solo amministratore'},403);
+    const id=Number(restoreMatch[1]); const b=await readJson(request); const qty=Math.max(0,parseInt(b.quantity||0));
+    const old=await env.DB.prepare(`SELECT * FROM products WHERE id=?`).bind(id).first(); if(!old)return json({error:'Prodotto non trovato'},404);
+    await env.DB.prepare(`UPDATE products SET deleted_at=NULL,current_qty=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(qty,qty>0?'available':'out_of_stock',id).run();
+    if(qty>0) await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,note) VALUES(?,?,?,?,?,?)`).bind(id,'restore',qty,0,qty,'Ripristino dal cestino').run();
+    await audit(env,'admin','restore','product',id,{quantity:qty}); return json({ok:true});
+  }
+
+  if(path==='/api/admin/search' && method==='GET'){
+    if(!admin) return json({error:'Solo amministratore'},403);
+    const u=new URL(request.url); const q=`%${u.searchParams.get('q')||''}%`;
+    const products=(await env.DB.prepare(`SELECT id,barcode,internal_code,brand,model,name,category,color,size,current_qty,deleted_at FROM products WHERE brand LIKE ? OR model LIKE ? OR name LIKE ? OR category LIKE ? OR barcode LIKE ? OR internal_code LIKE ? ORDER BY updated_at DESC LIMIT 30`).bind(q,q,q,q,q,q).all()).results;
+    const sales=(await env.DB.prepare(`SELECT id,sale_code,total,occurred_at,status FROM sales WHERE sale_code LIKE ? ORDER BY occurred_at DESC LIMIT 20`).bind(q).all()).results;
+    const returns=(await env.DB.prepare(`SELECT id,return_code,sale_code_snapshot,barcode_snapshot,product_snapshot,amount,created_at FROM returns WHERE return_code LIKE ? OR sale_code_snapshot LIKE ? OR barcode_snapshot LIKE ? OR product_snapshot LIKE ? ORDER BY created_at DESC LIMIT 20`).bind(q,q,q,q).all()).results;
+    return json({products,sales,returns});
+  }
+
+  if(path==='/api/admin/analytics' && method==='GET'){
+    if(!admin) return json({error:'Solo amministratore'},403);
+    const brands=(await env.DB.prepare(`SELECT COALESCE(NULLIF(p.brand,''),'Senza marca') label,SUM(si.quantity-si.returned_qty) qty,ROUND(SUM(si.line_total-(si.returned_qty*si.final_unit_price)),2) revenue FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id WHERE s.status='completed' GROUP BY label ORDER BY revenue DESC LIMIT 15`).all()).results;
+    const categories=(await env.DB.prepare(`SELECT COALESCE(NULLIF(p.category,''),'Senza categoria') label,SUM(si.quantity-si.returned_qty) qty,ROUND(SUM(si.line_total-(si.returned_qty*si.final_unit_price)),2) revenue FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id WHERE s.status='completed' GROUP BY label ORDER BY qty DESC LIMIT 15`).all()).results;
+    const sizes=(await env.DB.prepare(`SELECT COALESCE(NULLIF(p.size,''),'N/D') label,SUM(si.quantity-si.returned_qty) qty FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id WHERE s.status='completed' GROUP BY label ORDER BY qty DESC LIMIT 15`).all()).results;
+    const colors=(await env.DB.prepare(`SELECT COALESCE(NULLIF(p.color,''),'N/D') label,SUM(p.current_qty) stock FROM products p WHERE p.deleted_at IS NULL GROUP BY label ORDER BY stock DESC LIMIT 15`).all()).results;
+    const discounts=await env.DB.prepare(`SELECT ROUND(AVG(CASE WHEN subtotal>0 THEN discount_total/subtotal*100 ELSE 0 END),2) avg_percent,ROUND(AVG(discount_total),2) avg_amount FROM sales WHERE status='completed'`).first();
+    const returnsByBrand=(await env.DB.prepare(`SELECT COALESCE(NULLIF(p.brand,''),'Senza marca') label,SUM(r.quantity) returned_qty,ROUND(SUM(r.amount),2) amount FROM returns r JOIN products p ON p.id=r.product_id WHERE COALESCE(r.status,'registered')='registered' GROUP BY label ORDER BY returned_qty DESC LIMIT 15`).all()).results;
+    const top=(await env.DB.prepare(`SELECT p.id,p.brand,p.model,p.name,p.barcode,SUM(si.quantity-si.returned_qty) qty,ROUND(SUM(si.line_total-(si.returned_qty*si.final_unit_price)),2) revenue FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id WHERE s.status='completed' GROUP BY p.id ORDER BY revenue DESC LIMIT 10`).all()).results;
+    return json({brands,categories,sizes,colors,discounts,returns_by_brand:returnsByBrand,top});
+  }
+
+  if(path==='/api/admin/backup' && method==='GET'){
+    if(!admin) return json({error:'Solo amministratore'},403);
+    const names=['products','sales','sale_items','returns','stock_movements','commission_payments','audit_logs','inventory_sessions','inventory_items'];
+    const data={version:'1.7',created_at:new Date().toISOString(),tables:{}};
+    for(const name of names){try{data.tables[name]=(await env.DB.prepare(`SELECT * FROM ${name}`).all()).results}catch{data.tables[name]=[]}}
+    return json(data);
+  }
+
+
+  if(path==='/api/admin/backup/restore' && method==='POST'){
+    if(!admin) return json({error:'Solo amministratore'},403);
+    const b=await readJson(request); const tables=b?.tables;
+    if(!tables || !Array.isArray(tables.products) || !Array.isArray(tables.sales)) return json({error:'File di backup non valido'},400);
+    const definitions={
+      products:['id','barcode','internal_code','name','brand','category','model','color','size','season','notes','list_price','sale_price','cost_price','initial_qty','current_qty','sold_qty','status','created_at','updated_at','deleted_at'],
+      sales:['id','sale_code','subtotal','discount_total','total','status','source','occurred_at','created_at','updated_at','cancelled_at','cancellation_reason'],
+      sale_items:['id','sale_id','product_id','quantity','original_unit_price','final_unit_price','discount_amount','line_total','returned_qty','discount_type','discount_value'],
+      returns:['id','sale_id','sale_item_id','product_id','quantity','amount','reason','created_at','return_code','sale_code_snapshot','barcode_snapshot','product_snapshot','unit_refund_amount','registered_by','status'],
+      stock_movements:['id','product_id','type','quantity','previous_qty','new_qty','reference_type','reference_id','note','created_at'],
+      commission_payments:['id','period','amount','paid_at','note'],
+      audit_logs:['id','actor','action','entity_type','entity_id','details','created_at'],
+      inventory_sessions:['id','code','status','notes','started_at','closed_at','created_by'],
+      inventory_items:['id','inventory_id','product_id','expected_qty','counted_qty','updated_at']
+    };
+    const deleteOrder=['inventory_items','returns','sale_items','stock_movements','commission_payments','audit_logs','inventory_sessions','sales','products'];
+    for(const name of deleteOrder){try{await env.DB.prepare(`DELETE FROM ${name}`).run()}catch{}}
+    const insertOrder=['products','sales','sale_items','returns','stock_movements','commission_payments','audit_logs','inventory_sessions','inventory_items'];
+    let restored=0;
+    for(const name of insertOrder){
+      const rows=Array.isArray(tables[name])?tables[name]:[]; const allowed=definitions[name];
+      for(const row of rows){
+        const cols=allowed.filter(c=>Object.prototype.hasOwnProperty.call(row,c)); if(!cols.length)continue;
+        const sql=`INSERT INTO ${name}(${cols.join(',')}) VALUES(${cols.map(()=>'?').join(',')})`;
+        await env.DB.prepare(sql).bind(...cols.map(c=>row[c]??null)).run(); restored++;
+      }
+    }
+    await audit(env,'admin','restore','backup',null,{restored,backup_created_at:b.created_at||null});
+    return json({ok:true,restored});
+  }
+
+  if(path==='/api/admin/inventories' && method==='POST'){
+    if(!admin)return json({error:'Solo amministratore'},403); const b=await readJson(request); const code=uid('INV-');
+    const r=await env.DB.prepare(`INSERT INTO inventory_sessions(code,status,notes,created_by) VALUES(?,?,?,?)`).bind(code,'open',b.notes||'','admin').run();
+    await env.DB.prepare(`INSERT INTO inventory_items(inventory_id,product_id,expected_qty,counted_qty) SELECT ?,id,current_qty,0 FROM products WHERE deleted_at IS NULL`).bind(r.meta.last_row_id).run();
+    await audit(env,'admin','create','inventory',r.meta.last_row_id,{code}); return json({ok:true,id:r.meta.last_row_id,code});
+  }
+  const invMatch=path.match(/^\/api\/admin\/inventories\/(\d+)$/);
+  if(invMatch && method==='GET'){
+    if(!admin)return json({error:'Solo amministratore'},403); const id=Number(invMatch[1]);
+    const session=await env.DB.prepare(`SELECT * FROM inventory_sessions WHERE id=?`).bind(id).first(); if(!session)return json({error:'Inventario non trovato'},404);
+    const items=(await env.DB.prepare(`SELECT ii.*,p.barcode,p.internal_code,p.brand,p.model,p.name,p.category,p.color,p.size FROM inventory_items ii JOIN products p ON p.id=ii.product_id WHERE ii.inventory_id=? ORDER BY (ii.counted_qty-ii.expected_qty) ASC,p.brand,p.model`).bind(id).all()).results;
+    return json({session,items});
+  }
+  const invScanMatch=path.match(/^\/api\/admin\/inventories\/(\d+)\/scan$/);
+  if(invScanMatch && method==='POST'){
+    if(!admin)return json({error:'Solo amministratore'},403); const id=Number(invScanMatch[1]); const b=await readJson(request); const code=String(b.code||'').trim();
+    const product=await env.DB.prepare(`SELECT * FROM products WHERE deleted_at IS NULL AND (barcode=? OR internal_code=?) LIMIT 1`).bind(code,code).first(); if(!product)return json({error:'Prodotto non trovato'},404);
+    await env.DB.prepare(`UPDATE inventory_items SET counted_qty=counted_qty+1,updated_at=CURRENT_TIMESTAMP WHERE inventory_id=? AND product_id=?`).bind(id,product.id).run();
+    const item=await env.DB.prepare(`SELECT * FROM inventory_items WHERE inventory_id=? AND product_id=?`).bind(id,product.id).first(); return json({ok:true,product,item});
+  }
+  const invCloseMatch=path.match(/^\/api\/admin\/inventories\/(\d+)\/close$/);
+  if(invCloseMatch && method==='POST'){
+    if(!admin)return json({error:'Solo amministratore'},403); const id=Number(invCloseMatch[1]); const b=await readJson(request);
+    const items=(await env.DB.prepare(`SELECT ii.*,p.current_qty FROM inventory_items ii JOIN products p ON p.id=ii.product_id WHERE ii.inventory_id=?`).bind(id).all()).results;
+    if(b.apply_adjustments){for(const x of items){if(Number(x.counted_qty)===Number(x.current_qty))continue;await env.DB.prepare(`UPDATE products SET current_qty=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(x.counted_qty,x.counted_qty>0?'available':'out_of_stock',x.product_id).run();await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,reference_type,reference_id,note) VALUES(?,?,?,?,?,?,?,?)`).bind(x.product_id,'inventory_adjustment',x.counted_qty-x.current_qty,x.current_qty,x.counted_qty,'inventory',id,'Rettifica da inventario').run();}}
+    await env.DB.prepare(`UPDATE inventory_sessions SET status='closed',closed_at=CURRENT_TIMESTAMP WHERE id=?`).bind(id).run(); await audit(env,'admin','close','inventory',id,{apply_adjustments:!!b.apply_adjustments}); return json({ok:true});
+  }
+
   return json({ error: 'Endpoint non trovato' }, 404);
 }
 
