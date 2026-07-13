@@ -355,6 +355,28 @@ function downloadBackup(){const m=modal({title:'Backup e ripristino',body:`<div 
 
 
 
+// ===== V2.2: cataloghi guidati e magazzino per categorie =====
+const PRODUCT_CATEGORIES=[
+  'Magliette','Polo','Camicie','Maglie maniche lunghe','Felpe','Maglioni e cardigan',
+  'Giacche','Cappotti e piumini','Gilet','Pantaloncini','Pantaloni','Jeans','Tute',
+  'Completi','Abiti','Gonne','Leggings','Intimo','Costumi da bagno','Scarpe','Borse',
+  'Cinture','Cappelli','Sciarpe e guanti','Occhiali','Orologi','Gioielli e bijoux',
+  'Portafogli','Accessori','Oggetti e articoli vari'
+];
+const COMMON_BRANDS=[
+  'Adidas','Armani Exchange','Calvin Klein','Colmar','Diesel','Emporio Armani','Fila',
+  'Fred Perry','Guess','Hugo Boss','Jack & Jones','Lacoste','Levi's','Liu Jo','Moncler',
+  'Nike','Only','Peuterey','Puma','Ralph Lauren','Replay','Tommy Hilfiger',
+  'Under Armour','Vans','Versace Jeans Couture'
+];
+const COMMON_MODELS=[
+  'Basic','Logo','Oversize','Regular Fit','Slim Fit','Skinny','Straight','Cargo','Jogger',
+  'Chino','Mom Fit','Crop','Bomber','Blazer','Parka','Piumino','Coordinato','Classico'
+];
+const uniqSorted=values=>[...new Set(values.filter(Boolean).map(x=>String(x).trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'it'));
+const datalist=(id,values)=>`<datalist id="${id}">${uniqSorted(values).map(x=>`<option value="${String(x).replace(/"/g,'&quot;')}"></option>`).join('')}</datalist>`;
+const categoryRank=value=>{const i=PRODUCT_CATEGORIES.findIndex(x=>x.toLowerCase()===String(value||'').toLowerCase());return i<0?999:i};
+
 // ===== V2.0: modelli e varianti =====
 function groupedProducts(){
   const map=new Map();
@@ -369,14 +391,22 @@ function groupedProducts(){
 
 function products(){
   const groups=groupedProducts();
-  return `<div class="section-title"><h2>Magazzino</h2><button class="btn" id="addProduct">＋ Carica prodotto</button></div>
-  <div class="toolbar admin-product-toolbar"><input class="input" id="productSearch" placeholder="Cerca barcode, marca, categoria o modello..."><select class="input" id="stockFilter"><option value="all">Tutti</option><option value="available">Disponibili</option><option value="out">Esauriti</option><option value="stale">Fermi da 90 giorni</option></select><button class="btn secondary" id="importBtn">Importa CSV/XLSX</button></div>
-  <div class="model-list">${groups.map(g=>`<section class="card model-card" data-stock="${g.current_qty>0?'available':'out'}" data-updated="${g.updated_at}">
-    <div class="model-head"><div><h3>${g.brand||''} ${g.model||g.name||'Modello senza nome'}</h3><p class="muted">${g.category||'Senza categoria'} · ${g.variants.length} varianti · ${g.current_qty} pezzi</p></div><div class="row-actions"><button class="btn secondary addVariant" data-group="${g.id}">＋ Aggiungi variante</button></div></div>
+  const categoryNames=uniqSorted([...PRODUCT_CATEGORIES,...groups.map(g=>g.category||'Senza categoria')]);
+  const sections=new Map();
+  for(const g of groups){
+    const category=(g.category||'Senza categoria').trim()||'Senza categoria';
+    if(!sections.has(category))sections.set(category,[]);
+    sections.get(category).push(g);
+  }
+  const ordered=[...sections.entries()].sort((a,b)=>categoryRank(a[0])-categoryRank(b[0])||a[0].localeCompare(b[0],'it'));
+  const renderGroup=g=>`<section class="card model-card" data-stock="${g.current_qty>0?'available':'out'}" data-updated="${g.updated_at}" data-category="${g.category||'Senza categoria'}">
+    <div class="model-head"><div><h3>${g.brand||''} ${g.model||g.name||'Modello senza nome'}</h3><p class="muted">${g.variants.length} varianti · ${g.current_qty} pezzi</p></div><div class="row-actions"><button class="btn secondary addVariant" data-group="${g.id}">＋ Aggiungi variante</button></div></div>
     <div class="variant-grid">${g.variants.map(v=>`<div class="variant-row"><div><strong>${v.color||'Colore N/D'} · ${v.size||'Taglia N/D'}</strong><small>${v.barcode||v.internal_code}</small></div><div><span>${euro(baseSalePrice(v))}</span><strong>${v.current_qty} pz</strong></div><div class="row-actions"><button class="btn ghost productDetail" data-id="${v.id}">Apri</button><button class="btn ghost editProduct" data-id="${v.id}">Modifica</button>${state.admin?`<button class="btn danger deleteProduct" data-id="${v.id}">Elimina</button>`:''}</div></div>`).join('')}</div>
-  </section>`).join('')||'<div class="card"><p class="muted">Nessun prodotto registrato.</p></div>'}</div>`;
+  </section>`;
+  return `<div class="section-title"><h2>Magazzino</h2><button class="btn" id="addProduct">＋ Carica prodotto</button></div>
+  <div class="toolbar warehouse-toolbar"><input class="input" id="productSearch" placeholder="Cerca barcode, marca o modello..."><select class="input" id="categoryFilter"><option value="all">Tutte le categorie</option>${categoryNames.map(c=>`<option value="${c}">${c}</option>`).join('')}</select><select class="input" id="stockFilter"><option value="all">Tutte le disponibilità</option><option value="available">Disponibili</option><option value="out">Esauriti</option><option value="stale">Fermi da 90 giorni</option></select><button class="btn secondary" id="importBtn">Importa CSV/XLSX</button></div>
+  <div class="category-list">${ordered.map(([category,items])=>`<details class="category-section" data-category-section="${category}" open><summary><span>${category}</span><small>${items.length} modelli · ${items.reduce((n,g)=>n+g.current_qty,0)} pezzi</small></summary><div class="model-list">${items.map(renderGroup).join('')}</div></details>`).join('')||'<div class="card"><p class="muted">Nessun prodotto registrato.</p></div>'}</div>`;
 }
-
 async function scanSingleBarcode(title='Scansiona barcode'){
   return new Promise(resolve=>{
     const m=modal({title,body:`<div class="scanner"><video id="singleScanVideo"></video><div class="scanner-tip">Inquadra una sola etichetta della variante.</div></div><div class="manual-row"><input id="singleManual" class="input" inputmode="numeric" placeholder="Oppure inserisci il barcode"><button class="btn" id="singleGo">Continua</button></div>`});
@@ -413,7 +443,7 @@ function openProduct(p={},options={}){
   const isEdit=Boolean(p.id); const isNewModel=options.newModel||!isEdit; const barcode=p.barcode||options.barcode||'';
   const m=modal({title:isEdit?'Modifica variante':'Nuovo modello e prima variante',body:`<form id="productForm">
     <div class="barcode-confirm"><span>Barcode variante</span><strong>${barcode||p.internal_code||'—'}</strong></div><input type="hidden" name="barcode" value="${barcode}">
-    <h3>Dati del modello</h3><div class="form-grid"><div class="field"><label>Marca</label><input class="input" name="brand" value="${p.brand??''}"></div><div class="field"><label>Categoria</label><input class="input" name="category" value="${p.category??''}"></div><div class="field"><label>Modello</label><input class="input" name="model" value="${p.model??p.name??''}"></div><div class="field"><label>Prezzo listino</label><input class="input" name="list_price" type="number" min="0" step="0.01" value="${p.list_price??''}"></div><div class="field"><label>Prezzo vendita</label><input class="input" name="sale_price" type="number" min="0" step="0.01" value="${p.sale_price??p.list_price??''}"></div><div class="field full"><label>Note</label><textarea class="input" name="notes" rows="3">${p.notes??''}</textarea></div></div>
+    <h3>Dati del modello</h3><div class="form-grid"><div class="field"><label>Marca</label><input class="input" name="brand" list="brandOptions" autocomplete="off" placeholder="Seleziona o scrivi una marca" value="${p.brand??''}">${datalist('brandOptions',[...COMMON_BRANDS,...state.products.map(x=>x.brand)])}</div><div class="field"><label>Categoria</label><input class="input" name="category" list="categoryOptions" autocomplete="off" placeholder="Seleziona una categoria" value="${p.category??''}">${datalist('categoryOptions',PRODUCT_CATEGORIES)}</div><div class="field"><label>Modello / nome articolo</label><input class="input" name="model" list="modelOptions" autocomplete="off" placeholder="Seleziona o scrivi il modello" value="${p.model??p.name??''}">${datalist('modelOptions',[...COMMON_MODELS,...state.products.map(x=>x.model||x.name)])}</div><div class="field"><label>Prezzo listino</label><input class="input" name="list_price" type="number" min="0" step="0.01" value="${p.list_price??''}"></div><div class="field"><label>Prezzo vendita</label><input class="input" name="sale_price" type="number" min="0" step="0.01" value="${p.sale_price??p.list_price??''}"></div><div class="field full"><label>Note</label><textarea class="input" name="notes" rows="3">${p.notes??''}</textarea></div></div>
     <h3>Dati della variante</h3><div class="form-grid"><div class="field"><label>Colore</label><input class="input" name="color" value="${p.color??''}"></div><div class="field"><label>Taglia</label><input class="input" name="size" value="${p.size??''}"></div><div class="field"><label>Quantità totale</label><input class="input" name="${isEdit?'current_qty':'quantity'}" type="number" min="0" step="1" value="${isEdit?p.current_qty??0:0}"></div></div>
     <button class="btn" style="width:100%;margin-top:16px">${isEdit?'Salva modifiche':'Crea modello'}</button></form>`});
   m.querySelector('form').onsubmit=async e=>{e.preventDefault();const o=Object.fromEntries(new FormData(e.target));o.name=o.model||o.category||'';try{
@@ -445,7 +475,7 @@ function bindCommon(){
   document.querySelector('#adminLogin')?.addEventListener('click',openLogin);document.querySelector('#logout')?.addEventListener('click',async()=>{await api('/api/auth/logout',{method:'POST'});state.admin=false;render()});
   document.querySelectorAll('.editProduct').forEach(b=>b.onclick=()=>openProduct(state.products.find(x=>x.id==b.dataset.id)));document.querySelectorAll('.productDetail').forEach(b=>b.onclick=()=>openProductDetail(b.dataset.id));document.querySelectorAll('.addVariant').forEach(b=>b.onclick=()=>addVariantToGroup(b.dataset.group));document.querySelectorAll('.deleteProduct').forEach(b=>b.onclick=()=>deleteProduct(b.dataset.id));
   document.querySelectorAll('.saleDetail').forEach(b=>b.onclick=()=>openSaleDetail(b.dataset.id));document.querySelectorAll('.deleteSale').forEach(b=>b.onclick=()=>deleteSale(b.dataset.id,b.dataset.code));document.querySelectorAll('#globalSearchBtn,#globalSearchBtn2').forEach(b=>b.onclick=openGlobalSearch);document.querySelectorAll('#inventoryBtn').forEach(b=>b.onclick=openInventory);document.querySelectorAll('#analyticsBtn').forEach(b=>b.onclick=openAnalytics);document.querySelectorAll('#trashBtn').forEach(b=>b.onclick=openTrash);document.querySelector('#backupBtn')?.addEventListener('click',downloadBackup);
-  const ps=document.querySelector('#productSearch'),sf=document.querySelector('#stockFilter');const filterProducts=()=>{const q=(ps?.value||'').toLowerCase(),f=sf?.value||'all';document.querySelectorAll('.model-card').forEach(r=>{const stale=Date.now()-new Date(r.dataset.updated||Date.now()).getTime()>90*86400000;const ok=r.textContent.toLowerCase().includes(q)&&(f==='all'||r.dataset.stock===f||(f==='stale'&&stale));r.style.display=ok?'':'none'})};ps?.addEventListener('input',filterProducts);sf?.addEventListener('change',filterProducts);
+  const ps=document.querySelector('#productSearch'),sf=document.querySelector('#stockFilter'),cf=document.querySelector('#categoryFilter');const filterProducts=()=>{const q=(ps?.value||'').toLowerCase(),f=sf?.value||'all',c=cf?.value||'all';document.querySelectorAll('.model-card').forEach(r=>{const stale=Date.now()-new Date(r.dataset.updated||Date.now()).getTime()>90*86400000;const categoryOk=c==='all'||String(r.dataset.category||'')===c;const ok=r.textContent.toLowerCase().includes(q)&&categoryOk&&(f==='all'||r.dataset.stock===f||(f==='stale'&&stale));r.style.display=ok?'':'none'});document.querySelectorAll('.category-section').forEach(section=>{const visible=[...section.querySelectorAll('.model-card')].some(card=>card.style.display!=='none');section.style.display=visible?'':'none';if((q||c!=='all'||f!=='all')&&visible)section.open=true})};ps?.addEventListener('input',filterProducts);sf?.addEventListener('change',filterProducts);cf?.addEventListener('change',filterProducts);
   document.querySelector('#importBtn')?.addEventListener('click',openImport);document.querySelector('#movementsBtn')?.addEventListener('click',openMovements);document.querySelector('#returnsBtn')?.addEventListener('click',()=>{state.page='sales';state.salesView='returns';render()});document.querySelector('#commissionsBtn')?.addEventListener('click',openCommissions);document.querySelector('#auditBtn')?.addEventListener('click',openAudit);document.querySelector('#exportBtn')?.addEventListener('click',exportMenu);
   const selectAll=document.querySelector('#selectAllSales'),bulkBtn=document.querySelector('#bulkDeleteSales'),selections=()=>[...document.querySelectorAll('.saleSelect:checked')].map(x=>Number(x.value)),updateBulk=()=>{if(bulkBtn){const n=selections().length;bulkBtn.disabled=n===0;bulkBtn.textContent=n?`Elimina selezionate (${n})`:'Elimina selezionate'}};document.querySelectorAll('.saleSelect').forEach(x=>x.onchange=updateBulk);if(selectAll)selectAll.onchange=()=>{document.querySelectorAll('.saleSelect').forEach(x=>x.checked=selectAll.checked);updateBulk()};if(bulkBtn)bulkBtn.onclick=()=>deleteSalesBulk(selections());
 }
