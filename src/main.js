@@ -369,10 +369,10 @@ function groupedProducts(){
 
 function products(){
   const groups=groupedProducts();
-  return `<div class="section-title"><h2>Magazzino</h2><button class="btn" id="addProduct">＋ Nuovo modello</button></div>
+  return `<div class="section-title"><h2>Magazzino</h2><button class="btn" id="addProduct">＋ Carica prodotto</button></div>
   <div class="toolbar admin-product-toolbar"><input class="input" id="productSearch" placeholder="Cerca barcode, marca, categoria o modello..."><select class="input" id="stockFilter"><option value="all">Tutti</option><option value="available">Disponibili</option><option value="out">Esauriti</option><option value="stale">Fermi da 90 giorni</option></select><button class="btn secondary" id="importBtn">Importa CSV/XLSX</button></div>
   <div class="model-list">${groups.map(g=>`<section class="card model-card" data-stock="${g.current_qty>0?'available':'out'}" data-updated="${g.updated_at}">
-    <div class="model-head"><div><h3>${g.brand||''} ${g.model||g.name||'Modello senza nome'}</h3><p class="muted">${g.category||'Senza categoria'} · ${g.variants.length} varianti · ${g.current_qty} pezzi</p></div><div class="row-actions"><button class="btn secondary addVariant" data-group="${g.id}">＋ Variante</button></div></div>
+    <div class="model-head"><div><h3>${g.brand||''} ${g.model||g.name||'Modello senza nome'}</h3><p class="muted">${g.category||'Senza categoria'} · ${g.variants.length} varianti · ${g.current_qty} pezzi</p></div><div class="row-actions"><button class="btn secondary addVariant" data-group="${g.id}">＋ Aggiungi variante</button></div></div>
     <div class="variant-grid">${g.variants.map(v=>`<div class="variant-row"><div><strong>${v.color||'Colore N/D'} · ${v.size||'Taglia N/D'}</strong><small>${v.barcode||v.internal_code}</small></div><div><span>${euro(baseSalePrice(v))}</span><strong>${v.current_qty} pz</strong></div><div class="row-actions"><button class="btn ghost productDetail" data-id="${v.id}">Apri</button><button class="btn ghost editProduct" data-id="${v.id}">Modifica</button>${state.admin?`<button class="btn danger deleteProduct" data-id="${v.id}">Elimina</button>`:''}</div></div>`).join('')}</div>
   </section>`).join('')||'<div class="card"><p class="muted">Nessun prodotto registrato.</p></div>'}</div>`;
 }
@@ -385,6 +385,22 @@ async function scanSingleBarcode(title='Scansiona barcode'){
     m.querySelector('#singleManual').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();finish(e.target.value)}};
     (async()=>{try{const reader=new BrowserMultiFormatReader();const controls=await reader.decodeFromVideoDevice(undefined,m.querySelector('#singleScanVideo'),result=>{if(result)finish(result.getText())});state.scanner={reset:()=>controls.stop()}}catch{m.querySelector('.scanner-tip').textContent='Fotocamera non disponibile. Inserisci il codice manualmente.'}})();
   });
+}
+
+
+function openProductLoadMenu(){
+  const groups=groupedProducts();
+  const m=modal({title:'Carica prodotto',body:`<p class="muted">Scegli cosa devi registrare.</p><div class="grid two load-choice-grid"><button class="card btn secondary" id="createModelChoice"><strong>Nuovo modello</strong><span>Prima variante di un articolo mai registrato</span></button><button class="card btn secondary" id="addVariantChoice" ${groups.length?'':'disabled'}><strong>Nuova variante</strong><span>Nuovo colore o nuova taglia di un modello esistente</span></button></div>${groups.length?'':'<div class="notice" style="margin-top:12px">Prima registra almeno un modello.</div>'}`});
+  m.querySelector('#createModelChoice').onclick=()=>{m.remove();createNewModel()};
+  const add=m.querySelector('#addVariantChoice');
+  if(add)add.onclick=()=>{m.remove();chooseGroupForVariant()};
+}
+
+function chooseGroupForVariant(){
+  const groups=groupedProducts();
+  const m=modal({title:'Scegli il modello',body:`<div class="field"><label>Cerca modello</label><input class="input" id="groupVariantSearch" placeholder="Marca, categoria o modello"></div><div class="group-choice-list" id="groupChoiceList">${groups.map(g=>`<button class="group-choice" data-group="${g.id}"><span><strong>${g.brand||''} ${g.model||g.name||'Modello senza nome'}</strong><small>${g.category||'Senza categoria'} · ${g.variants.length} varianti</small></span><b>＋</b></button>`).join('')||'<p class="muted">Nessun modello disponibile.</p>'}</div>`});
+  const bind=()=>m.querySelectorAll('.group-choice').forEach(b=>b.onclick=()=>{const id=b.dataset.group;m.remove();addVariantToGroup(id)});bind();
+  m.querySelector('#groupVariantSearch').oninput=e=>{const q=e.target.value.toLowerCase();m.querySelectorAll('.group-choice').forEach(b=>b.style.display=b.textContent.toLowerCase().includes(q)?'':'none')};
 }
 
 async function createNewModel(){
@@ -425,7 +441,7 @@ async function openInventory(){
 
 function bindCommon(){
   document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>{state.page=b.dataset.page;render()});document.querySelectorAll('[data-sales-view]').forEach(b=>b.onclick=()=>{state.salesView=b.dataset.salesView;render()});
-  document.querySelector('#scanNav')?.addEventListener('click',()=>openScanner('sale'));document.querySelectorAll('#addProduct').forEach(b=>b.onclick=createNewModel);document.querySelectorAll('#newSale').forEach(b=>b.onclick=()=>openScanner('sale'));
+  document.querySelector('#scanNav')?.addEventListener('click',()=>openScanner('sale'));document.querySelectorAll('#addProduct').forEach(b=>b.onclick=openProductLoadMenu);document.querySelectorAll('#newSale').forEach(b=>b.onclick=()=>openScanner('sale'));
   document.querySelector('#adminLogin')?.addEventListener('click',openLogin);document.querySelector('#logout')?.addEventListener('click',async()=>{await api('/api/auth/logout',{method:'POST'});state.admin=false;render()});
   document.querySelectorAll('.editProduct').forEach(b=>b.onclick=()=>openProduct(state.products.find(x=>x.id==b.dataset.id)));document.querySelectorAll('.productDetail').forEach(b=>b.onclick=()=>openProductDetail(b.dataset.id));document.querySelectorAll('.addVariant').forEach(b=>b.onclick=()=>addVariantToGroup(b.dataset.group));document.querySelectorAll('.deleteProduct').forEach(b=>b.onclick=()=>deleteProduct(b.dataset.id));
   document.querySelectorAll('.saleDetail').forEach(b=>b.onclick=()=>openSaleDetail(b.dataset.id));document.querySelectorAll('.deleteSale').forEach(b=>b.onclick=()=>deleteSale(b.dataset.id,b.dataset.code));document.querySelectorAll('#globalSearchBtn,#globalSearchBtn2').forEach(b=>b.onclick=openGlobalSearch);document.querySelectorAll('#inventoryBtn').forEach(b=>b.onclick=openInventory);document.querySelectorAll('#analyticsBtn').forEach(b=>b.onclick=openAnalytics);document.querySelectorAll('#trashBtn').forEach(b=>b.onclick=openTrash);document.querySelector('#backupBtn')?.addEventListener('click',downloadBackup);
