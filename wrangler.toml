@@ -10,7 +10,7 @@ not_found_handling = "single-page-application"
 [[d1_databases]]
 binding = "DB"
 database_name = "gestionale-mb-db"
-database_id = "INSERISCI_DATABASE_ID"
+database_id = "b551a219-33d3-4235-a8e1-ea0d419aa7b4"
 migrations_dir = "migrations"
 
 [vars]
