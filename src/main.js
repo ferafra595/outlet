@@ -20,18 +20,128 @@ function render(){let content='';if(state.page==='home')content=home();if(state.
 function home(){const d=state.dashboard||{inventory:{units:0,out_of_stock:0},month:{sales:0,revenue:0,commission:0},top:[],trend:[]};return `<div class="actions"><button class="btn large" id="addProduct">＋ Carica prodotto</button><button class="btn large secondary" id="newSale">⌁ Registra vendita</button></div><div class="grid ${state.admin?'three':'two'}"><div class="card stat"><span class="muted">Prodotti disponibili</span><strong>${d.inventory.units||0}</strong></div><div class="card stat"><span class="muted">Prodotti esauriti</span><strong>${d.inventory.out_of_stock||0}</strong></div><div class="card stat"><span class="muted">Vendite del mese</span><strong>${d.month.sales||0}</strong></div>${state.admin?`<div class="card stat"><span class="muted">Incasso mese</span><strong>${euro(d.month.revenue)}</strong></div><div class="card stat"><span class="muted">Provvigione maturata</span><strong>${euro(d.month.commission)}</strong></div><div class="card stat"><span class="muted">Da incassare</span><strong>${euro(d.month.commission_due)}</strong></div>`:''}</div>${state.admin?adminHome(d):recentOps()}`}
 function adminHome(d){const max=Math.max(...(d.trend||[]).map(x=>x.revenue),1);return `<div class="grid two" style="margin-top:14px"><div class="card"><h3>Andamento ultimi 12 mesi</h3><div class="chart">${(d.trend||[]).map(x=>`<div class="bar" style="height:${Math.max(8,x.revenue/max*100)}%"><span>${x.period.slice(5)}</span></div>`).join('')||'<span class="muted">Nessun dato</span>'}</div></div><div class="card"><h3>Prodotti più venduti</h3>${(d.top||[]).slice(0,6).map(x=>`<div style="display:flex;justify-content:space-between;padding:8px 0"><span>${x.brand} ${x.name}</span><strong>${x.qty}</strong></div>`).join('')||'<span class="muted">Nessuna vendita</span>'}</div></div><div class="card" style="margin-top:14px"><h3>Prodotti fermi da oltre 90 giorni</h3>${(d.stale||[]).length?d.stale.map(x=>`<div style="display:flex;justify-content:space-between;padding:8px 0"><span>${x.brand} ${x.name}</span><span class="muted">${x.current_qty} pz</span></div>`).join(''):'<span class="muted">Nessun prodotto fermo.</span>'}</div>`}
 function recentOps(){return `<div class="card" style="margin-top:14px"><h3>Ultime vendite</h3>${state.sales.slice(0,6).map(s=>`<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #eee"><span>${s.sale_code}<br><small class="muted">${new Date(s.occurred_at).toLocaleString('it-IT')}</small></span><strong>${euro(s.total)}</strong></div>`).join('')||'<span class="muted">Nessuna vendita.</span>'}</div>`}
-function products(){return `<div class="section-title"><h2>Magazzino</h2><button class="btn" id="addProduct">＋ Nuovo</button></div><div class="toolbar"><input class="input" id="productSearch" placeholder="Cerca codice, nome, marca..."><button class="btn secondary" id="importBtn">Importa CSV/XLSX</button></div><div class="table-wrap"><table><thead><tr><th>Prodotto</th><th>Codice</th><th>Taglia</th><th>Prezzo</th><th>Quantità</th><th>Stato</th><th></th></tr></thead><tbody>${state.products.map(p=>`<tr><td><strong>${p.brand||''} ${p.name||'Senza nome'}</strong><br><small class="muted">${p.category||''} ${p.color||''}</small></td><td>${p.barcode||p.internal_code}</td><td>${p.size||'—'}</td><td>${euro(p.list_price)}</td><td>${p.current_qty}</td><td><span class="badge ${p.current_qty>0?'ok':'bad'}">${p.current_qty>0?'Disponibile':'Esaurito'}</span></td><td><button class="btn ghost editProduct" data-id="${p.id}">Modifica</button></td></tr>`).join('')}</tbody></table></div>`}
+function products(){return `<div class="section-title"><h2>Magazzino</h2><button class="btn" id="addProduct">＋ Nuovo</button></div><div class="toolbar"><input class="input" id="productSearch" placeholder="Cerca codice, nome, marca..."><button class="btn secondary" id="importBtn">Importa CSV/XLSX</button></div><div class="table-wrap"><table><thead><tr><th>Prodotto</th><th>Codice</th><th>Taglia</th><th>Prezzo</th><th>Quantità</th><th>Stato</th><th></th></tr></thead><tbody>${state.products.map(p=>`<tr><td><strong>${p.brand||''} ${p.model||p.name||'Senza modello'}</strong><br><small class="muted">${p.category||''} ${p.color||''}</small></td><td>${p.barcode||p.internal_code}</td><td>${p.size||'—'}</td><td><small class="muted">Listino ${euro(p.list_price)}</small><br><strong>${euro(baseSalePrice(p))}</strong></td><td>${p.current_qty}</td><td><span class="badge ${p.current_qty>0?'ok':'bad'}">${p.current_qty>0?'Disponibile':'Esaurito'}</span></td><td><button class="btn ghost editProduct" data-id="${p.id}">Modifica</button></td></tr>`).join('')}</tbody></table></div>`}
 function sales(){return `<div class="section-title"><h2>Vendite</h2><button class="btn" id="newSale">＋ Registra</button></div><div class="table-wrap"><table><thead><tr><th>Codice</th><th>Data</th><th>Articoli</th><th>Sconto</th><th>Totale</th><th>Stato</th><th></th></tr></thead><tbody>${state.sales.map(s=>`<tr><td>${s.sale_code}</td><td>${new Date(s.occurred_at).toLocaleString('it-IT')}</td><td>${s.items_count}</td><td>${euro(s.discount_total)}</td><td><strong>${euro(s.total)}</strong></td><td><span class="badge ${s.status==='completed'?'ok':'bad'}">${s.status==='completed'?'Completata':'Annullata'}</span></td><td><button class="btn ghost saleDetail" data-id="${s.id}">Apri</button></td></tr>`).join('')}</tbody></table></div>`}
 function more(){return `<h2>Strumenti</h2><div class="grid two"><button class="card btn secondary" id="movementsBtn">Storico movimenti</button>${state.admin?'<button class="card btn secondary" id="commissionsBtn">Provvigioni</button><button class="card btn secondary" id="auditBtn">Registro attività</button><button class="card btn secondary" id="exportBtn">Esporta report</button>':''}</div><div class="card" style="margin-top:14px"><h3>Installazione su iPhone</h3><p class="muted">Apri il sito in Safari, premi Condividi e scegli “Aggiungi alla schermata Home”.</p></div>`}
 
-function bindCommon(){document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>{state.page=b.dataset.page;render()});document.querySelector('#scanNav')?.addEventListener('click',()=>openScanner('sale'));document.querySelectorAll('#addProduct').forEach(b=>b.onclick=()=>openProduct());document.querySelectorAll('#newSale').forEach(b=>b.onclick=()=>openScanner('sale'));document.querySelector('#adminLogin')?.addEventListener('click',openLogin);document.querySelector('#logout')?.addEventListener('click',async()=>{await api('/api/auth/logout',{method:'POST'});state.admin=false;render()});document.querySelectorAll('.editProduct').forEach(b=>b.onclick=()=>openProduct(state.products.find(x=>x.id==b.dataset.id)));document.querySelectorAll('.saleDetail').forEach(b=>b.onclick=()=>openSaleDetail(b.dataset.id));document.querySelector('#productSearch')?.addEventListener('input',e=>{const q=e.target.value.toLowerCase();document.querySelectorAll('tbody tr').forEach(r=>r.style.display=r.textContent.toLowerCase().includes(q)?'':'none')});document.querySelector('#importBtn')?.addEventListener('click',openImport);document.querySelector('#movementsBtn')?.addEventListener('click',openMovements);document.querySelector('#commissionsBtn')?.addEventListener('click',openCommissions);document.querySelector('#auditBtn')?.addEventListener('click',openAudit);document.querySelector('#exportBtn')?.addEventListener('click',exportMenu)}
+function bindCommon(){document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>{state.page=b.dataset.page;render()});document.querySelector('#scanNav')?.addEventListener('click',()=>openScanner('sale'));document.querySelectorAll('#addProduct').forEach(b=>b.onclick=()=>openScanner('product'));document.querySelectorAll('#newSale').forEach(b=>b.onclick=()=>openScanner('sale'));document.querySelector('#adminLogin')?.addEventListener('click',openLogin);document.querySelector('#logout')?.addEventListener('click',async()=>{await api('/api/auth/logout',{method:'POST'});state.admin=false;render()});document.querySelectorAll('.editProduct').forEach(b=>b.onclick=()=>openProduct(state.products.find(x=>x.id==b.dataset.id)));document.querySelectorAll('.saleDetail').forEach(b=>b.onclick=()=>openSaleDetail(b.dataset.id));document.querySelector('#productSearch')?.addEventListener('input',e=>{const q=e.target.value.toLowerCase();document.querySelectorAll('tbody tr').forEach(r=>r.style.display=r.textContent.toLowerCase().includes(q)?'':'none')});document.querySelector('#importBtn')?.addEventListener('click',openImport);document.querySelector('#movementsBtn')?.addEventListener('click',openMovements);document.querySelector('#commissionsBtn')?.addEventListener('click',openCommissions);document.querySelector('#auditBtn')?.addEventListener('click',openAudit);document.querySelector('#exportBtn')?.addEventListener('click',exportMenu)}
 function modal(html){const el=document.createElement('div');el.className='modal';el.innerHTML=`<div class="modal-panel"><div class="modal-head"><h2 style="margin:0">${html.title||''}</h2><button class="close">×</button></div>${html.body}</div>`;document.body.appendChild(el);el.querySelector('.close').onclick=()=>{state.scanner?.reset?.();el.remove()};return el}
 function openLogin(){const m=modal({title:'Accesso amministratore',body:`<form id="loginForm"><div class="field"><label>Email</label><input class="input" name="email" type="email" value="effestrategy@gmail.com"></div><div class="field" style="margin-top:12px"><label>Password</label><input class="input" name="password" type="password" required></div><button class="btn" style="width:100%;margin-top:16px">Accedi</button></form>`});m.querySelector('form').onsubmit=async e=>{e.preventDefault();const o=Object.fromEntries(new FormData(e.target));try{await api('/api/auth/login',{method:'POST',body:JSON.stringify(o)});state.admin=true;m.remove();refresh()}catch(err){alert(err.message)}}}
-function openProduct(p={}){const m=modal({title:p.id?'Modifica prodotto':'Nuovo prodotto',body:`<form id="productForm"><div class="form-grid">${[['barcode','Codice a barre'],['name','Nome'],['brand','Marca'],['category','Categoria'],['model','Modello'],['color','Colore'],['size','Taglia'],['season','Stagione'],['list_price','Prezzo vendita'],['cost_price','Costo'],['current_qty','Quantità'],['notes','Note']].map(([n,l])=>`<div class="field"><label>${l}</label><input class="input" name="${n}" type="${n.includes('price')||n==='current_qty'?'number':'text'}" step="${n.includes('price')?'0.01':'1'}" value="${p[n]??''}"></div>`).join('')}</div><button class="btn" style="width:100%;margin-top:16px">Salva prodotto</button></form>`});m.querySelector('form').onsubmit=async e=>{e.preventDefault();const o=Object.fromEntries(new FormData(e.target));try{if(!state.online){queue({type:p.id?'product_update':'product_create',id:p.id,data:o});m.remove();alert('Salvato offline. Sarà sincronizzato.');return}await api(p.id?`/api/products/${p.id}`:'/api/products',{method:p.id?'PUT':'POST',body:JSON.stringify(o)});m.remove();refresh()}catch(err){alert(err.message)}}}
-async function openScanner(mode='sale'){const m=modal({title:mode==='sale'?'Scansiona vendita':'Scansiona prodotto',body:`<div class="scanner"><video id="video"></video><div class="scanner-tip">Inquadra il codice a barre. La scansione resta aperta.</div></div><div style="display:flex;gap:8px;margin-top:12px"><input id="manualCode" class="input" placeholder="Oppure inserisci il codice"><button class="btn" id="manualGo">Cerca</button></div><div id="scanCart" style="margin-top:14px"></div>`});const handle=async code=>{if(m.dataset.busy)return;m.dataset.busy='1';setTimeout(()=>m.dataset.busy='',900);try{const p=await api(`/api/products/lookup/${encodeURIComponent(code)}`);if(mode==='sale'){addCart(p);renderScannerCart(m)}else{m.remove();openProduct(p)}}catch{if(confirm('Prodotto non presente. Vuoi registrarlo?')){m.remove();openProduct({barcode:code,current_qty:1})}}};m.querySelector('#manualGo').onclick=()=>handle(m.querySelector('#manualCode').value.trim());try{const reader=new BrowserMultiFormatReader();state.scanner=reader;const controls=await reader.decodeFromVideoDevice(undefined,m.querySelector('#video'),result=>{if(result){navigator.vibrate?.(80);handle(result.getText())}});state.scanner={reset:()=>controls.stop()}}catch(e){m.querySelector('.scanner-tip').textContent='Fotocamera non disponibile. Usa il campo manuale.'}renderScannerCart(m)}
-function addCart(p){const x=state.cart.find(i=>i.product.id===p.id);if(x)x.quantity++;else state.cart.push({product:p,quantity:1,final_unit_price:p.list_price})}
-function renderScannerCart(m){const box=m.querySelector('#scanCart');if(!box)return;box.innerHTML=`<h3>Carrello (${state.cart.reduce((a,x)=>a+x.quantity,0)})</h3>${state.cart.map((x,i)=>`<div class="cart-item"><div><strong>${x.product.brand} ${x.product.name}</strong><br><small class="muted">${x.product.barcode||x.product.internal_code}</small></div><input class="input qty" data-i="${i}" type="number" min="1" value="${x.quantity}"><input class="input finalPrice" data-i="${i}" type="number" step="0.01" value="${x.final_unit_price}"><button class="btn danger remove" data-i="${i}">×</button></div>`).join('')||'<p class="muted">Scansiona il primo prodotto.</p>'}<div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px"><strong>Totale: ${euro(state.cart.reduce((a,x)=>a+x.quantity*x.final_unit_price,0))}</strong><button class="btn" id="checkout" ${state.cart.length?'':'disabled'}>Conferma vendita</button></div>`;box.querySelectorAll('.qty').forEach(el=>el.onchange=()=>{state.cart[el.dataset.i].quantity=Math.max(1,+el.value);renderScannerCart(m)});box.querySelectorAll('.finalPrice').forEach(el=>el.onchange=()=>{state.cart[el.dataset.i].final_unit_price=+el.value;renderScannerCart(m)});box.querySelectorAll('.remove').forEach(el=>el.onclick=()=>{state.cart.splice(el.dataset.i,1);renderScannerCart(m)});box.querySelector('#checkout').onclick=()=>checkout(m)}
-async function checkout(m){const payload={items:state.cart.map(x=>({product_id:x.product.id,quantity:x.quantity,final_unit_price:x.final_unit_price})),source:'store'};try{if(!state.online){queue({type:'sale_create',data:payload});state.cart=[];m.remove();alert('Vendita salvata offline.');return}const r=await api('/api/sales',{method:'POST',body:JSON.stringify(payload)});state.cart=[];m.remove();alert(`Vendita ${r.sale_code} registrata. Totale ${euro(r.total)}`);refresh()}catch(e){alert(e.message)}}
+function productLabel(p){return [p.brand,p.model||p.name,p.category,p.color,p.size].filter(Boolean).join(' · ')||'Prodotto senza descrizione'}
+function baseSalePrice(p){const v=Number(p.sale_price);return Number.isFinite(v)&&v>=0?v:Number(p.list_price)||0}
+function itemFinalPrice(x){const base=baseSalePrice(x.product);const value=Math.max(0,Number(x.discount_value)||0);if(x.discount_type==='percent')return Math.max(0,base-(base*Math.min(value,100)/100));return Math.max(0,base-value)}
+function cartTotals(){return state.cart.reduce((a,x)=>{const base=baseSalePrice(x.product)*x.quantity;const total=itemFinalPrice(x)*x.quantity;return {subtotal:a.subtotal+base,total:a.total+total,discount:a.discount+(base-total)}},{subtotal:0,total:0,discount:0})}
+
+function openProduct(p={}, options={}){
+  const isEdit=Boolean(p.id);
+  const barcode=p.barcode||options.barcode||'';
+  const fields=[
+    ['brand','Marca','text'],['category','Categoria','text'],['model','Modello','text'],['color','Colore','text'],['size','Taglia','text'],
+    [isEdit?'current_qty':'quantity','Quantità','number'],['list_price','Prezzo listino','number'],['sale_price','Prezzo vendita','number'],['notes','Note','text']
+  ];
+  const m=modal({title:isEdit?'Modifica prodotto':'Dati del nuovo capo',body:`<form id="productForm">
+    <div class="barcode-confirm"><span>Codice a barre</span><strong>${barcode||p.internal_code||'Codice interno automatico'}</strong></div>
+    <input type="hidden" name="barcode" value="${barcode}">
+    <div class="form-grid">${fields.map(([n,l,t])=>`<div class="field ${n==='notes'?'full':''}"><label>${l}</label>${n==='notes'?`<textarea class="input" name="${n}" rows="3">${p[n]??''}</textarea>`:`<input class="input" name="${n}" type="${t}" ${t==='number'?'min="0" step="'+(n.includes('price')?'0.01':'1')+'"':''} value="${p[n]??''}">`}</div>`).join('')}</div>
+    <button class="btn" style="width:100%;margin-top:16px">${isEdit?'Salva modifiche':'Registra prodotto'}</button>
+  </form>`});
+  m.querySelector('form').onsubmit=async e=>{
+    e.preventDefault();const o=Object.fromEntries(new FormData(e.target));
+    o.name=o.model||o.category||'';
+    try{
+      if(!state.online){queue({type:isEdit?'product_update':'product_create',id:p.id,data:o});m.remove();alert('Salvato offline. Sarà sincronizzato.');return}
+      await api(isEdit?`/api/products/${p.id}`:'/api/products',{method:isEdit?'PUT':'POST',body:JSON.stringify(o)});
+      m.remove();refresh();
+    }catch(err){alert(err.message)}
+  };
+}
+
+async function openScanner(mode='sale'){
+  if(mode==='sale') state.cart=[];
+  const m=modal({title:mode==='sale'?'Registra vendita':'Scansiona il codice del prodotto',body:`
+    <div class="scanner"><video id="video"></video><div class="scanner-tip">Inquadra il codice a barre con la fotocamera.</div></div>
+    <div class="manual-row"><input id="manualCode" class="input" inputmode="numeric" placeholder="Inserisci il barcode manualmente"><button class="btn" id="manualGo">Continua</button></div>
+    ${mode==='sale'?`<div class="product-search"><input id="productQuery" class="input" placeholder="Oppure cerca per marca, modello, categoria..."><button class="btn secondary" id="productSearchGo">Cerca prodotto</button></div><div id="searchResults"></div>`:''}
+    <div id="scanCart" style="margin-top:14px"></div>`});
+
+  const stopScanner=()=>{try{state.scanner?.reset?.()}catch{} state.scanner=null};
+  const handle=async code=>{
+    code=String(code||'').trim();if(!code||m.dataset.busy)return;
+    m.dataset.busy='1';setTimeout(()=>m.dataset.busy='',900);
+    try{
+      const p=await api(`/api/products/lookup/${encodeURIComponent(code)}`);
+      if(mode==='sale'){addCart(p);renderScannerCart(m);navigator.vibrate?.(80)}
+      else{
+        stopScanner();m.remove();
+        if(confirm(`Il codice ${code} è già registrato. Vuoi aprire il prodotto?`))openProduct(p);
+      }
+    }catch(err){
+      if(mode==='product'){
+        stopScanner();m.remove();openProduct({barcode:code},{barcode:code});
+      }else alert('Nessun prodotto trovato con questo barcode. Caricalo prima nel magazzino.');
+    }
+  };
+  m.querySelector('#manualGo').onclick=()=>handle(m.querySelector('#manualCode').value);
+  m.querySelector('#manualCode').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();handle(e.target.value)}});
+
+  if(mode==='sale'){
+    const search=async()=>{
+      const q=m.querySelector('#productQuery').value.trim();if(!q)return;
+      try{
+        const rows=await api(`/api/products?q=${encodeURIComponent(q)}`);
+        const box=m.querySelector('#searchResults');
+        box.innerHTML=rows.length?`<div class="search-list">${rows.slice(0,12).map(p=>`<button class="search-result" data-id="${p.id}"><span><strong>${productLabel(p)}</strong><small>${p.barcode||p.internal_code} · ${euro(baseSalePrice(p))} · ${p.current_qty} pz</small></span><b>＋</b></button>`).join('')}</div>`:'<p class="muted">Nessun prodotto trovato.</p>';
+        box.querySelectorAll('.search-result').forEach(b=>b.onclick=()=>{const p=rows.find(x=>x.id==b.dataset.id);addCart(p);renderScannerCart(m)});
+      }catch(e){alert(e.message)}
+    };
+    m.querySelector('#productSearchGo').onclick=search;
+    m.querySelector('#productQuery').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();search()}});
+  }
+
+  try{
+    const reader=new BrowserMultiFormatReader();
+    const controls=await reader.decodeFromVideoDevice(undefined,m.querySelector('#video'),result=>{if(result)handle(result.getText())});
+    state.scanner={reset:()=>controls.stop()};
+  }catch(e){m.querySelector('.scanner-tip').textContent='Fotocamera non disponibile. Inserisci il codice manualmente.'}
+  if(mode==='sale')renderScannerCart(m);
+}
+
+function addCart(p){
+  const x=state.cart.find(i=>i.product.id===p.id);
+  if(x)x.quantity++;
+  else state.cart.push({product:p,quantity:1,discount_type:'percent',discount_value:0});
+}
+
+function renderScannerCart(m){
+  const box=m.querySelector('#scanCart');if(!box)return;
+  const t=cartTotals();
+  box.innerHTML=`<div class="cart-head"><h3>Carrello (${state.cart.reduce((a,x)=>a+x.quantity,0)})</h3>${state.cart.length?'<button class="btn ghost" id="clearCart">Svuota</button>':''}</div>
+  ${state.cart.map((x,i)=>`<div class="cart-item sale-cart-item">
+    <div class="cart-product"><strong>${productLabel(x.product)}</strong><small>${x.product.barcode||x.product.internal_code} · Prezzo ${euro(baseSalePrice(x.product))}</small></div>
+    <div class="field compact"><label>Qtà</label><input class="input qty" data-i="${i}" type="number" min="1" value="${x.quantity}"></div>
+    <div class="field compact"><label>Sconto</label><select class="input discountType" data-i="${i}"><option value="percent" ${x.discount_type==='percent'?'selected':''}>%</option><option value="amount" ${x.discount_type==='amount'?'selected':''}>€</option></select></div>
+    <div class="field compact"><label>Valore</label><input class="input discountValue" data-i="${i}" type="number" min="0" step="0.01" value="${x.discount_value}"></div>
+    <div class="line-total"><span>Totale</span><strong>${euro(itemFinalPrice(x)*x.quantity)}</strong></div>
+    <button class="btn danger remove" data-i="${i}">×</button>
+  </div>`).join('')||'<p class="muted">Scansiona o cerca il primo prodotto.</p>'}
+  <div class="checkout-summary"><div><span>Subtotale</span><strong>${euro(t.subtotal)}</strong></div><div><span>Sconto</span><strong>− ${euro(t.discount)}</strong></div><div class="grand-total"><span>Totale vendita</span><strong>${euro(t.total)}</strong></div><button class="btn" id="checkout" ${state.cart.length?'':'disabled'}>Conferma vendita</button></div>`;
+  box.querySelectorAll('.qty').forEach(el=>el.onchange=()=>{state.cart[el.dataset.i].quantity=Math.max(1,+el.value||1);renderScannerCart(m)});
+  box.querySelectorAll('.discountType').forEach(el=>el.onchange=()=>{state.cart[el.dataset.i].discount_type=el.value;renderScannerCart(m)});
+  box.querySelectorAll('.discountValue').forEach(el=>el.oninput=()=>{state.cart[el.dataset.i].discount_value=Math.max(0,+el.value||0);renderScannerCart(m)});
+  box.querySelectorAll('.remove').forEach(el=>el.onclick=()=>{state.cart.splice(el.dataset.i,1);renderScannerCart(m)});
+  box.querySelector('#clearCart')?.addEventListener('click',()=>{state.cart=[];renderScannerCart(m)});
+  box.querySelector('#checkout').onclick=()=>checkout(m);
+}
+
+async function checkout(m){
+  const payload={items:state.cart.map(x=>({product_id:x.product.id,quantity:x.quantity,discount_type:x.discount_type,discount_value:x.discount_value})),source:'store'};
+  try{
+    if(!state.online){queue({type:'sale_create',data:payload});state.cart=[];state.scanner?.reset?.();m.remove();alert('Vendita salvata offline.');return}
+    const r=await api('/api/sales',{method:'POST',body:JSON.stringify(payload)});
+    state.cart=[];state.scanner?.reset?.();m.remove();alert(`Vendita ${r.sale_code} registrata. Totale ${euro(r.total)}`);refresh();
+  }catch(e){alert(`Vendita non registrata: ${e.message}`)}
+}
+
 async function openSaleDetail(id){
   try{
     const s=await api(`/api/sales/${id}`);
@@ -46,7 +156,7 @@ async function openSaleDetail(id){
     m.querySelector('#cancelSale')?.addEventListener('click',async()=>{const reason=prompt('Motivo annullamento:','');if(reason===null)return;await api(`/api/sales/${id}/cancel`,{method:'POST',body:JSON.stringify({reason})});m.remove();refresh()});
   }catch(e){alert(e.message)}
 }
-function openImport(){const m=modal({title:'Importa prodotti',body:`<p class="muted">Colonne supportate: barcode, name, brand, category, model, color, size, season, list_price, cost_price, quantity, notes.</p><input type="file" id="file" class="input" accept=".csv,.xlsx,.xls"><button class="btn" id="doImport" style="width:100%;margin-top:12px">Importa</button>`});m.querySelector('#doImport').onclick=async()=>{const f=m.querySelector('#file').files[0];if(!f)return alert('Seleziona un file');const buf=await f.arrayBuffer();const wb=XLSX.read(buf);const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''});const r=await api('/api/products/import',{method:'POST',body:JSON.stringify({rows})});alert(`Inseriti: ${r.inserted}\nAggiornati: ${r.updated}\nErrori: ${r.errors.length}`);m.remove();refresh()}}
+function openImport(){const m=modal({title:'Importa prodotti',body:`<p class="muted">Colonne supportate: barcode, brand, category, model, color, size, list_price, sale_price, quantity, notes.</p><input type="file" id="file" class="input" accept=".csv,.xlsx,.xls"><button class="btn" id="doImport" style="width:100%;margin-top:12px">Importa</button>`});m.querySelector('#doImport').onclick=async()=>{const f=m.querySelector('#file').files[0];if(!f)return alert('Seleziona un file');const buf=await f.arrayBuffer();const wb=XLSX.read(buf);const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''});const r=await api('/api/products/import',{method:'POST',body:JSON.stringify({rows})});alert(`Inseriti: ${r.inserted}\nAggiornati: ${r.updated}\nErrori: ${r.errors.length}`);m.remove();refresh()}}
 async function openMovements(){const rows=await api('/api/movements');modal({title:'Storico movimenti',body:`<div class="table-wrap"><table><thead><tr><th>Data</th><th>Prodotto</th><th>Tipo</th><th>Movimento</th><th>Quantità</th></tr></thead><tbody>${rows.map(x=>`<tr><td>${new Date(x.created_at).toLocaleString('it-IT')}</td><td>${x.brand} ${x.name}</td><td>${x.type}</td><td>${x.quantity>0?'+':''}${x.quantity}</td><td>${x.previous_qty} → ${x.new_qty}</td></tr>`).join('')}</tbody></table></div>`})}
 async function openCommissions(){const rows=await api('/api/commissions');const m=modal({title:'Provvigioni mensili',body:`<div class="table-wrap"><table><thead><tr><th>Mese</th><th>Vendite</th><th>Provvigione</th><th>Pagata</th><th>Da incassare</th><th></th></tr></thead><tbody>${rows.map(x=>`<tr><td>${x.period}</td><td>${euro(x.revenue)}</td><td>${euro(x.commission)}</td><td>${euro(x.paid)}</td><td><strong>${euro(x.due)}</strong></td><td><button class="btn ghost pay" data-period="${x.period}" data-amount="${x.commission}">Segna pagata</button></td></tr>`).join('')}</tbody></table></div>`});m.querySelectorAll('.pay').forEach(b=>b.onclick=async()=>{await api('/api/commissions/pay',{method:'POST',body:JSON.stringify({period:b.dataset.period,amount:+b.dataset.amount})});m.remove();openCommissions()})}
 async function openAudit(){const rows=await api('/api/audit');modal({title:'Registro attività',body:`<div class="table-wrap"><table><thead><tr><th>Data</th><th>Utente</th><th>Azione</th><th>Elemento</th></tr></thead><tbody>${rows.map(x=>`<tr><td>${new Date(x.created_at).toLocaleString('it-IT')}</td><td>${x.actor}</td><td>${x.action}</td><td>${x.entity_type} #${x.entity_id||''}</td></tr>`).join('')}</tbody></table></div>`})}
