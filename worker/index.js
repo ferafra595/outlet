@@ -86,8 +86,8 @@ async function api(request, env, path) {
     const internal = b.internal_code || uid('MB-');
     const qty = Math.max(0, parseInt(b.quantity || b.initial_qty || 0));
     try {
-      const r = await env.DB.prepare(`INSERT INTO products(barcode,internal_code,name,brand,category,model,color,size,season,notes,list_price,cost_price,initial_qty,current_qty,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .bind(b.barcode || null, internal, b.name||'', b.brand||'', b.category||'', b.model||'', b.color||'', b.size||'', b.season||'', b.notes||'', money(b.list_price), money(b.cost_price), qty, qty, qty > 0 ? 'available':'out_of_stock').run();
+      const r = await env.DB.prepare(`INSERT INTO products(barcode,internal_code,name,brand,category,model,color,size,season,notes,list_price,sale_price,cost_price,initial_qty,current_qty,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(b.barcode || null, internal, b.name||'', b.brand||'', b.category||'', b.model||'', b.color||'', b.size||'', b.season||'', b.notes||'', money(b.list_price), money(b.sale_price ?? b.list_price), money(b.cost_price), qty, qty, qty > 0 ? 'available':'out_of_stock').run();
       await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,note) VALUES(?,?,?,?,?,?)`).bind(r.meta.last_row_id,'initial_load',qty,0,qty,'Caricamento iniziale').run();
       await audit(env, admin ? 'admin':'store', 'create', 'product', r.meta.last_row_id, b);
       return json({ id: r.meta.last_row_id, internal_code: internal }, 201);
@@ -100,8 +100,8 @@ async function api(request, env, path) {
     const old = await env.DB.prepare(`SELECT * FROM products WHERE id=?`).bind(id).first();
     if (!old) return json({ error: 'Prodotto non trovato' }, 404);
     const newQty = b.current_qty === undefined ? old.current_qty : Math.max(0, parseInt(b.current_qty));
-    await env.DB.prepare(`UPDATE products SET barcode=?,name=?,brand=?,category=?,model=?,color=?,size=?,season=?,notes=?,list_price=?,cost_price=?,current_qty=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .bind(b.barcode ?? old.barcode, b.name ?? old.name, b.brand ?? old.brand, b.category ?? old.category, b.model ?? old.model, b.color ?? old.color, b.size ?? old.size, b.season ?? old.season, b.notes ?? old.notes, money(b.list_price ?? old.list_price), money(b.cost_price ?? old.cost_price), newQty, newQty > 0 ? 'available':'out_of_stock', id).run();
+    await env.DB.prepare(`UPDATE products SET barcode=?,name=?,brand=?,category=?,model=?,color=?,size=?,season=?,notes=?,list_price=?,sale_price=?,cost_price=?,current_qty=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+      .bind(b.barcode ?? old.barcode, b.name ?? old.name, b.brand ?? old.brand, b.category ?? old.category, b.model ?? old.model, b.color ?? old.color, b.size ?? old.size, b.season ?? old.season, b.notes ?? old.notes, money(b.list_price ?? old.list_price), money(b.sale_price ?? old.sale_price ?? old.list_price), money(b.cost_price ?? old.cost_price), newQty, newQty > 0 ? 'available':'out_of_stock', id).run();
     if (newQty !== old.current_qty) await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,note) VALUES(?,?,?,?,?,?)`).bind(id,'adjustment',newQty-old.current_qty,old.current_qty,newQty,'Modifica quantità').run();
     await audit(env, admin ? 'admin':'store', 'update', 'product', id, { before: old, after: b });
     return json({ ok: true });
@@ -121,8 +121,8 @@ async function api(request, env, path) {
           await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,note) VALUES(?,?,?,?,?,?)`).bind(existing.id,'import',qty,existing.current_qty,nq,'Importazione file').run(); updated++;
         } else {
           const internal = row.internal_code || uid('MB-');
-          const r = await env.DB.prepare(`INSERT INTO products(barcode,internal_code,name,brand,category,model,color,size,season,notes,list_price,cost_price,initial_qty,current_qty,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-            .bind(code,internal,row.name||'',row.brand||'',row.category||'',row.model||'',row.color||'',row.size||'',row.season||'',row.notes||'',money(row.list_price),money(row.cost_price),qty,qty,qty>0?'available':'out_of_stock').run();
+          const r = await env.DB.prepare(`INSERT INTO products(barcode,internal_code,name,brand,category,model,color,size,season,notes,list_price,sale_price,cost_price,initial_qty,current_qty,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .bind(code,internal,row.name||'',row.brand||'',row.category||'',row.model||'',row.color||'',row.size||'',row.season||'',row.notes||'',money(row.list_price),money(row.sale_price ?? row.list_price),money(row.cost_price),qty,qty,qty>0?'available':'out_of_stock').run();
           await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,note) VALUES(?,?,?,?,?,?)`).bind(r.meta.last_row_id,'import',qty,0,qty,'Importazione file').run(); inserted++;
         }
       } catch(e){ errors.push({ row:i+2,error:e.message }); }
@@ -140,22 +140,26 @@ async function api(request, env, path) {
       const p = await env.DB.prepare(`SELECT * FROM products WHERE id=? AND deleted_at IS NULL`).bind(item.product_id).first();
       if (!p) return json({ error: 'Uno dei prodotti non esiste' }, 400);
       const qty = Math.max(1, parseInt(item.quantity||1));
-      const original = money(p.list_price); const final = money(item.final_unit_price ?? original);
+      const original = money(p.sale_price ?? p.list_price);
+      const discountType = item.discount_type === 'amount' ? 'amount' : 'percent';
+      const discountValue = Math.max(0, Number(item.discount_value)||0);
+      const unitDiscount = discountType === 'percent' ? original * Math.min(discountValue,100) / 100 : Math.min(discountValue,original);
+      const final = money(Math.max(0, original-unitDiscount));
       subtotal += original*qty; total += final*qty;
-      normalized.push({p,qty,original,final});
+      normalized.push({p,qty,original,final,discountType,discountValue});
     }
     subtotal=money(subtotal); total=money(total); const discount=money(subtotal-total);
     const sr = await env.DB.prepare(`INSERT INTO sales(sale_code,subtotal,discount_total,total,status,source,occurred_at) VALUES(?,?,?,?,?,?,?)`)
       .bind(saleCode,subtotal,discount,total,'completed',b.source||'store',b.occurred_at||new Date().toISOString()).run();
     for (const x of normalized) {
-      const ir = await env.DB.prepare(`INSERT INTO sale_items(sale_id,product_id,quantity,original_unit_price,final_unit_price,discount_amount,line_total) VALUES(?,?,?,?,?,?,?)`)
-        .bind(sr.meta.last_row_id,x.p.id,x.qty,x.original,x.final,money((x.original-x.final)*x.qty),money(x.final*x.qty)).run();
+      await env.DB.prepare(`INSERT INTO sale_items(sale_id,product_id,quantity,original_unit_price,final_unit_price,discount_amount,discount_type,discount_value,line_total) VALUES(?,?,?,?,?,?,?,?,?)`)
+        .bind(sr.meta.last_row_id,x.p.id,x.qty,x.original,x.final,money((x.original-x.final)*x.qty),x.discountType,x.discountValue,money(x.final*x.qty)).run();
       const newQty = x.p.current_qty - x.qty;
       await env.DB.prepare(`UPDATE products SET current_qty=?, sold_qty=sold_qty+?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(newQty,x.qty,newQty>0?'available':'out_of_stock',x.p.id).run();
-      await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,reference_type,reference_id,note) VALUES(?,?,?,?,?,?,?,?,?)`)
+      await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,reference_type,reference_id,note) VALUES(?,?,?,?,?,?,?,?)`)
         .bind(x.p.id,'sale',-x.qty,x.p.current_qty,newQty,'sale',sr.meta.last_row_id,`Vendita ${saleCode}`).run();
     }
-    await audit(env, admin?'admin':'store','create','sale',sr.meta.last_row_id,{saleCode,total,items:normalized.length});
+    await audit(env, admin?'admin':'store','create','sale',sr.meta.last_row_id,{saleCode,total,discount,items:normalized.length});
     await notify(env, `Nuova vendita ${saleCode}`, `<p>Totale vendita: <strong>€ ${total.toFixed(2)}</strong></p>`);
     return json({ id: sr.meta.last_row_id, sale_code:saleCode, subtotal, discount, total },201);
   }
