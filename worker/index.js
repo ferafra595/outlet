@@ -89,31 +89,73 @@ async function api(request, env, path) {
   if (path === '/api/auth/logout' && method === 'POST') return json({ ok: true }, 200, { 'set-cookie': 'mb_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0' });
   if (path === '/api/auth/me') return json({ authenticated: admin });
 
+  if (path === '/api/product-groups' && method === 'GET') {
+    const url=new URL(request.url); const q=`%${url.searchParams.get('q')||''}%`;
+    const rows=await env.DB.prepare(`SELECT g.*,COUNT(p.id) variants_count,COALESCE(SUM(CASE WHEN p.deleted_at IS NULL THEN p.current_qty ELSE 0 END),0) current_qty,COALESCE(SUM(CASE WHEN p.deleted_at IS NULL THEN p.sold_qty ELSE 0 END),0) sold_qty FROM product_groups g LEFT JOIN products p ON p.group_id=g.id WHERE g.deleted_at IS NULL AND (g.brand LIKE ? OR g.category LIKE ? OR g.model LIKE ? OR g.name LIKE ? OR EXISTS(SELECT 1 FROM products px WHERE px.group_id=g.id AND (px.barcode LIKE ? OR px.internal_code LIKE ?))) GROUP BY g.id ORDER BY g.updated_at DESC`)
+      .bind(q,q,q,q,q,q).all();
+    return json(rows.results);
+  }
+
+  const groupMatch=path.match(/^\/api\/product-groups\/(\d+)$/);
+  if(groupMatch && method==='GET'){
+    const id=Number(groupMatch[1]);
+    const group=await env.DB.prepare(`SELECT * FROM product_groups WHERE id=? AND deleted_at IS NULL`).bind(id).first();
+    if(!group)return json({error:'Modello non trovato'},404);
+    const variants=(await env.DB.prepare(`SELECT * FROM products WHERE group_id=? AND deleted_at IS NULL ORDER BY color,size,created_at`).bind(id).all()).results;
+    return json({group,variants});
+  }
+
+  if(path==='/api/product-groups' && method==='POST'){
+    const b=await readJson(request); const variants=Array.isArray(b.variants)?b.variants:[];
+    if(!String(b.brand||'').trim() && !String(b.model||'').trim())return json({error:'Inserisci almeno marca o modello'},400);
+    if(!variants.length)return json({error:'Aggiungi almeno una variante'},400);
+    try{
+      const gr=await env.DB.prepare(`INSERT INTO product_groups(brand,category,model,name,notes,list_price,sale_price,cost_price) VALUES(?,?,?,?,?,?,?,?)`)
+        .bind(b.brand||'',b.category||'',b.model||'',b.name||b.model||'',b.notes||'',money(b.list_price),money(b.sale_price??b.list_price),money(b.cost_price)).run();
+      const groupId=gr.meta.last_row_id; const created=[];
+      for(const v of variants){
+        const qty=Math.max(0,parseInt(v.quantity||0)); const internal=v.internal_code||uid('MB-');
+        const pr=await env.DB.prepare(`INSERT INTO products(group_id,barcode,internal_code,name,brand,category,model,color,size,season,notes,list_price,sale_price,cost_price,initial_qty,current_qty,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .bind(groupId,v.barcode||null,internal,b.name||b.model||'',b.brand||'',b.category||'',b.model||'',v.color||'',v.size||'',b.season||'',b.notes||'',money(b.list_price),money(b.sale_price??b.list_price),money(b.cost_price),qty,qty,qty>0?'available':'out_of_stock').run();
+        if(qty>0)await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,note) VALUES(?,?,?,?,?,?)`).bind(pr.meta.last_row_id,'initial_load',qty,0,qty,'Caricamento iniziale variante').run();
+        created.push({id:pr.meta.last_row_id,barcode:v.barcode||null});
+      }
+      await audit(env,admin?'admin':'store','create','product_group',groupId,{brand:b.brand,model:b.model,variants:created.length});
+      return json({ok:true,id:groupId,variants:created},201);
+    }catch(e){return json({error:e.message.includes('UNIQUE')?'Uno dei barcode è già utilizzato':'Errore nel salvataggio del modello'},400)}
+  }
+
+  const groupVariantMatch=path.match(/^\/api\/product-groups\/(\d+)\/variants$/);
+  if(groupVariantMatch && method==='POST'){
+    const groupId=Number(groupVariantMatch[1]); const b=await readJson(request);
+    const g=await env.DB.prepare(`SELECT * FROM product_groups WHERE id=? AND deleted_at IS NULL`).bind(groupId).first(); if(!g)return json({error:'Modello non trovato'},404);
+    const qty=Math.max(0,parseInt(b.quantity||0)); const internal=b.internal_code||uid('MB-');
+    try{
+      const r=await env.DB.prepare(`INSERT INTO products(group_id,barcode,internal_code,name,brand,category,model,color,size,notes,list_price,sale_price,cost_price,initial_qty,current_qty,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(groupId,b.barcode||null,internal,g.name||g.model||'',g.brand||'',g.category||'',g.model||'',b.color||'',b.size||'',g.notes||'',money(g.list_price),money(g.sale_price),money(g.cost_price),qty,qty,qty>0?'available':'out_of_stock').run();
+      if(qty>0)await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,note) VALUES(?,?,?,?,?,?)`).bind(r.meta.last_row_id,'initial_load',qty,0,qty,'Nuova variante').run();
+      await env.DB.prepare(`UPDATE product_groups SET updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(groupId).run();
+      await audit(env,admin?'admin':'store','create','product_variant',r.meta.last_row_id,{group_id:groupId,barcode:b.barcode});
+      return json({ok:true,id:r.meta.last_row_id},201);
+    }catch(e){return json({error:e.message.includes('UNIQUE')?'Barcode già utilizzato':'Errore nel salvataggio della variante'},400)}
+  }
+
   if (path === '/api/products' && method === 'GET') {
-    const url = new URL(request.url);
-    const q = `%${url.searchParams.get('q') || ''}%`;
-    const rows = await env.DB.prepare(`SELECT * FROM products WHERE deleted_at IS NULL AND (name LIKE ? OR brand LIKE ? OR barcode LIKE ? OR internal_code LIKE ? OR category LIKE ?) ORDER BY updated_at DESC`)
-      .bind(q,q,q,q,q).all();
+    const url = new URL(request.url); const q = `%${url.searchParams.get('q') || ''}%`;
+    const rows = await env.DB.prepare(`SELECT p.*,COALESCE(g.brand,p.brand) brand,COALESCE(g.category,p.category) category,COALESCE(g.model,p.model) model,COALESCE(g.name,p.name) name,COALESCE(g.notes,p.notes) notes,COALESCE(g.list_price,p.list_price) list_price,COALESCE(g.sale_price,p.sale_price,p.list_price) sale_price,COALESCE(g.cost_price,p.cost_price) cost_price FROM products p LEFT JOIN product_groups g ON g.id=p.group_id WHERE p.deleted_at IS NULL AND (COALESCE(g.name,p.name) LIKE ? OR COALESCE(g.brand,p.brand) LIKE ? OR p.barcode LIKE ? OR p.internal_code LIKE ? OR COALESCE(g.category,p.category) LIKE ? OR COALESCE(g.model,p.model) LIKE ?) ORDER BY COALESCE(g.updated_at,p.updated_at) DESC,p.color,p.size`)
+      .bind(q,q,q,q,q,q).all();
     return json(rows.results);
   }
 
   if (path.startsWith('/api/products/lookup/') && method === 'GET') {
     const code = decodeURIComponent(path.split('/').pop());
-    const row = await env.DB.prepare(`SELECT * FROM products WHERE deleted_at IS NULL AND (barcode=? OR internal_code=?) LIMIT 1`).bind(code,code).first();
-    return row ? json(row) : json({ error: 'Prodotto non trovato' }, 404);
+    const row = await env.DB.prepare(`SELECT p.*,COALESCE(g.brand,p.brand) brand,COALESCE(g.category,p.category) category,COALESCE(g.model,p.model) model,COALESCE(g.name,p.name) name,COALESCE(g.notes,p.notes) notes,COALESCE(g.list_price,p.list_price) list_price,COALESCE(g.sale_price,p.sale_price,p.list_price) sale_price,COALESCE(g.cost_price,p.cost_price) cost_price FROM products p LEFT JOIN product_groups g ON g.id=p.group_id WHERE p.deleted_at IS NULL AND (p.barcode=? OR p.internal_code=?) LIMIT 1`).bind(code,code).first();
+    return row ? json(row) : json({ error: 'Variante non trovata' }, 404);
   }
 
   if (path === '/api/products' && method === 'POST') {
-    const b = await readJson(request);
-    const internal = b.internal_code || uid('MB-');
-    const qty = Math.max(0, parseInt(b.quantity || b.initial_qty || 0));
-    try {
-      const r = await env.DB.prepare(`INSERT INTO products(barcode,internal_code,name,brand,category,model,color,size,season,notes,list_price,sale_price,cost_price,initial_qty,current_qty,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .bind(b.barcode || null, internal, b.name||'', b.brand||'', b.category||'', b.model||'', b.color||'', b.size||'', b.season||'', b.notes||'', money(b.list_price), money(b.sale_price ?? b.list_price), money(b.cost_price), qty, qty, qty > 0 ? 'available':'out_of_stock').run();
-      await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,note) VALUES(?,?,?,?,?,?)`).bind(r.meta.last_row_id,'initial_load',qty,0,qty,'Caricamento iniziale').run();
-      await audit(env, admin ? 'admin':'store', 'create', 'product', r.meta.last_row_id, b);
-      return json({ id: r.meta.last_row_id, internal_code: internal }, 201);
-    } catch (e) { return json({ error: e.message.includes('UNIQUE') ? 'Codice già utilizzato' : 'Errore nel salvataggio' }, 400); }
+    const b=await readJson(request);
+    return api(new Request(request.url.replace('/api/products','/api/product-groups'),{method:'POST',headers:request.headers,body:JSON.stringify({...b,variants:[{barcode:b.barcode,color:b.color,size:b.size,quantity:b.quantity||b.initial_qty||0}]})}),env,'/api/product-groups');
   }
 
   const productMatch = path.match(/^\/api\/products\/(\d+)$/);
@@ -138,8 +180,12 @@ async function api(request, env, path) {
     const old = await env.DB.prepare(`SELECT * FROM products WHERE id=?`).bind(id).first();
     if (!old) return json({ error: 'Prodotto non trovato' }, 404);
     const newQty = b.current_qty === undefined ? old.current_qty : Math.max(0, parseInt(b.current_qty));
+    if(old.group_id){
+      await env.DB.prepare(`UPDATE product_groups SET brand=?,category=?,model=?,name=?,notes=?,list_price=?,sale_price=?,cost_price=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+        .bind(b.brand??old.brand,b.category??old.category,b.model??old.model,b.name??b.model??old.name,b.notes??old.notes,money(b.list_price??old.list_price),money(b.sale_price??old.sale_price??old.list_price),money(b.cost_price??old.cost_price),old.group_id).run();
+    }
     await env.DB.prepare(`UPDATE products SET barcode=?,name=?,brand=?,category=?,model=?,color=?,size=?,season=?,notes=?,list_price=?,sale_price=?,cost_price=?,current_qty=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .bind(b.barcode ?? old.barcode, b.name ?? old.name, b.brand ?? old.brand, b.category ?? old.category, b.model ?? old.model, b.color ?? old.color, b.size ?? old.size, b.season ?? old.season, b.notes ?? old.notes, money(b.list_price ?? old.list_price), money(b.sale_price ?? old.sale_price ?? old.list_price), money(b.cost_price ?? old.cost_price), newQty, newQty > 0 ? 'available':'out_of_stock', id).run();
+      .bind(b.barcode ?? old.barcode, b.name ?? b.model ?? old.name, b.brand ?? old.brand, b.category ?? old.category, b.model ?? old.model, b.color ?? old.color, b.size ?? old.size, b.season ?? old.season, b.notes ?? old.notes, money(b.list_price ?? old.list_price), money(b.sale_price ?? old.sale_price ?? old.list_price), money(b.cost_price ?? old.cost_price), newQty, newQty > 0 ? 'available':'out_of_stock', id).run();
     if (newQty !== old.current_qty) await env.DB.prepare(`INSERT INTO stock_movements(product_id,type,quantity,previous_qty,new_qty,note) VALUES(?,?,?,?,?,?)`).bind(id,'adjustment',newQty-old.current_qty,old.current_qty,newQty,'Modifica quantità').run();
     await audit(env, admin ? 'admin':'store', 'update', 'product', id, { before: old, after: b });
     return json({ ok: true });
@@ -403,7 +449,7 @@ async function api(request, env, path) {
 
   if(path==='/api/admin/backup' && method==='GET'){
     if(!admin) return json({error:'Solo amministratore'},403);
-    const names=['products','sales','sale_items','returns','stock_movements','commission_payments','audit_logs','inventory_sessions','inventory_items'];
+    const names=['product_groups','products','sales','sale_items','returns','stock_movements','commission_payments','audit_logs','inventory_sessions','inventory_items'];
     const data={version:'1.7',created_at:new Date().toISOString(),tables:{}};
     for(const name of names){try{data.tables[name]=(await env.DB.prepare(`SELECT * FROM ${name}`).all()).results}catch{data.tables[name]=[]}}
     return json(data);
@@ -415,7 +461,8 @@ async function api(request, env, path) {
     const b=await readJson(request); const tables=b?.tables;
     if(!tables || !Array.isArray(tables.products) || !Array.isArray(tables.sales)) return json({error:'File di backup non valido'},400);
     const definitions={
-      products:['id','barcode','internal_code','name','brand','category','model','color','size','season','notes','list_price','sale_price','cost_price','initial_qty','current_qty','sold_qty','status','created_at','updated_at','deleted_at'],
+      product_groups:['id','brand','category','model','name','notes','list_price','sale_price','cost_price','created_at','updated_at','deleted_at'],
+      products:['id','group_id','barcode','internal_code','name','brand','category','model','color','size','season','notes','list_price','sale_price','cost_price','initial_qty','current_qty','sold_qty','status','created_at','updated_at','deleted_at'],
       sales:['id','sale_code','subtotal','discount_total','total','status','source','occurred_at','created_at','updated_at','cancelled_at','cancellation_reason'],
       sale_items:['id','sale_id','product_id','quantity','original_unit_price','final_unit_price','discount_amount','line_total','returned_qty','discount_type','discount_value'],
       returns:['id','sale_id','sale_item_id','product_id','quantity','amount','reason','created_at','return_code','sale_code_snapshot','barcode_snapshot','product_snapshot','unit_refund_amount','registered_by','status'],
@@ -425,9 +472,9 @@ async function api(request, env, path) {
       inventory_sessions:['id','code','status','notes','started_at','closed_at','created_by'],
       inventory_items:['id','inventory_id','product_id','expected_qty','counted_qty','updated_at']
     };
-    const deleteOrder=['inventory_items','returns','sale_items','stock_movements','commission_payments','audit_logs','inventory_sessions','sales','products'];
+    const deleteOrder=['inventory_items','returns','sale_items','stock_movements','commission_payments','audit_logs','inventory_sessions','sales','products','product_groups'];
     for(const name of deleteOrder){try{await env.DB.prepare(`DELETE FROM ${name}`).run()}catch{}}
-    const insertOrder=['products','sales','sale_items','returns','stock_movements','commission_payments','audit_logs','inventory_sessions','inventory_items'];
+    const insertOrder=['product_groups','products','sales','sale_items','returns','stock_movements','commission_payments','audit_logs','inventory_sessions','inventory_items'];
     let restored=0;
     for(const name of insertOrder){
       const rows=Array.isArray(tables[name])?tables[name]:[]; const allowed=definitions[name];
@@ -458,7 +505,9 @@ async function api(request, env, path) {
   if(invScanMatch && method==='POST'){
     if(!admin)return json({error:'Solo amministratore'},403); const id=Number(invScanMatch[1]); const b=await readJson(request); const code=String(b.code||'').trim();
     const product=await env.DB.prepare(`SELECT * FROM products WHERE deleted_at IS NULL AND (barcode=? OR internal_code=?) LIMIT 1`).bind(code,code).first(); if(!product)return json({error:'Prodotto non trovato'},404);
-    await env.DB.prepare(`UPDATE inventory_items SET counted_qty=counted_qty+1,updated_at=CURRENT_TIMESTAMP WHERE inventory_id=? AND product_id=?`).bind(id,product.id).run();
+    const counted=b.counted_qty===undefined?null:Math.max(0,parseInt(b.counted_qty||0));
+    if(counted===null) await env.DB.prepare(`UPDATE inventory_items SET counted_qty=counted_qty+1,updated_at=CURRENT_TIMESTAMP WHERE inventory_id=? AND product_id=?`).bind(id,product.id).run();
+    else await env.DB.prepare(`UPDATE inventory_items SET counted_qty=?,updated_at=CURRENT_TIMESTAMP WHERE inventory_id=? AND product_id=?`).bind(counted,id,product.id).run();
     const item=await env.DB.prepare(`SELECT * FROM inventory_items WHERE inventory_id=? AND product_id=?`).bind(id,product.id).first(); return json({ok:true,product,item});
   }
   const invCloseMatch=path.match(/^\/api\/admin\/inventories\/(\d+)\/close$/);
