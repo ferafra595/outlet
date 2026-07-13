@@ -1,0 +1,26 @@
+{
+  "name": "gestionale-mb",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"vite\" \"wrangler dev --local\"",
+    "dev:web": "vite",
+    "dev:worker": "wrangler dev --local",
+    "build": "vite build",
+    "deploy": "npm run build && wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote"
+  },
+  "dependencies": {
+    "@zxing/browser": "^0.1.5",
+    "jspdf": "^2.5.2",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "vite": "^6.1.0",
+    "vite-plugin-pwa": "^0.21.1",
+    "wrangler": "^4.11.1"
+  }
+}
