@@ -161,11 +161,11 @@ async function api(request, env, path) {
     }
     await audit(env, admin?'admin':'store','create','sale',sr.meta.last_row_id,{saleCode,total,discount,items:normalized.length});
     await notify(env, `Nuova vendita ${saleCode}`, `<p>Totale vendita: <strong>€ ${total.toFixed(2)}</strong></p>`);
-    return json({ id: sr.meta.last_row_id, sale_code:saleCode, subtotal, discount, total },201);
+    return json({ id: sr.meta.last_row_id, sale_code:saleCode, subtotal, discount, total, product_barcodes: normalized.map(x => x.p.barcode || x.p.internal_code).filter(Boolean) },201);
   }
 
   if (path === '/api/sales' && method === 'GET') {
-    const rows = await env.DB.prepare(`SELECT s.*, COUNT(si.id) items_count FROM sales s LEFT JOIN sale_items si ON si.sale_id=s.id GROUP BY s.id ORDER BY s.occurred_at DESC LIMIT 1000`).all();
+    const rows = await env.DB.prepare(`SELECT s.*, COUNT(si.id) items_count, GROUP_CONCAT(COALESCE(p.barcode,p.internal_code)) product_barcodes FROM sales s LEFT JOIN sale_items si ON si.sale_id=s.id LEFT JOIN products p ON p.id=si.product_id GROUP BY s.id ORDER BY s.occurred_at DESC LIMIT 1000`).all();
     return json(rows.results);
   }
 
