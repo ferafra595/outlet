@@ -189,14 +189,30 @@ function renderScannerCart(m){
     <div class="cart-product"><strong>${productLabel(x.product)}</strong><small>${x.product.barcode||x.product.internal_code} · Prezzo ${euro(baseSalePrice(x.product))}</small></div>
     <div class="field compact"><label>Qtà</label><input class="input qty" data-i="${i}" type="number" min="1" value="${x.quantity}"></div>
     <div class="field compact"><label>Sconto</label><select class="input discountType" data-i="${i}"><option value="percent" ${x.discount_type==='percent'?'selected':''}>%</option><option value="amount" ${x.discount_type==='amount'?'selected':''}>€</option></select></div>
-    <div class="field compact"><label>Valore</label><input class="input discountValue" data-i="${i}" type="number" min="0" step="0.01" value="${x.discount_value}"></div>
-    <div class="line-total"><span>Totale</span><strong>${euro(itemFinalPrice(x)*x.quantity)}</strong></div>
+    <div class="field compact"><label>Valore</label><input class="input discountValue" data-i="${i}" type="text" inputmode="decimal" autocomplete="off" value="${x.discount_value}"></div>
+    <div class="line-total" data-line-total="${i}"><span>Totale</span><strong>${euro(itemFinalPrice(x)*x.quantity)}</strong></div>
     <button class="btn danger remove" data-i="${i}">×</button>
   </div>`).join('')||'<p class="muted">Scansiona o cerca il primo prodotto.</p>'}
-  <div class="checkout-summary"><div><span>Subtotale</span><strong>${euro(t.subtotal)}</strong></div><div><span>Sconto</span><strong>− ${euro(t.discount)}</strong></div><div class="grand-total"><span>Totale vendita</span><strong>${euro(t.total)}</strong></div><button class="btn" id="checkout" ${state.cart.length?'':'disabled'}>Conferma vendita</button></div>`;
+  <div class="checkout-summary"><div><span>Subtotale</span><strong data-cart-subtotal>${euro(t.subtotal)}</strong></div><div><span>Sconto</span><strong data-cart-discount>− ${euro(t.discount)}</strong></div><div class="grand-total"><span>Totale vendita</span><strong data-cart-total>${euro(t.total)}</strong></div><button class="btn" id="checkout" ${state.cart.length?'':'disabled'}>Conferma vendita</button></div>`;
+  const updateTotals=()=>{
+    state.cart.forEach((item,i)=>{const target=box.querySelector(`[data-line-total="${i}"] strong`);if(target)target.textContent=euro(itemFinalPrice(item)*item.quantity)});
+    const totals=cartTotals();
+    const subtotal=box.querySelector('[data-cart-subtotal]');if(subtotal)subtotal.textContent=euro(totals.subtotal);
+    const discount=box.querySelector('[data-cart-discount]');if(discount)discount.textContent=`− ${euro(totals.discount)}`;
+    const total=box.querySelector('[data-cart-total]');if(total)total.textContent=euro(totals.total);
+  };
   box.querySelectorAll('.qty').forEach(el=>el.onchange=()=>{state.cart[el.dataset.i].quantity=Math.max(1,+el.value||1);renderScannerCart(m)});
-  box.querySelectorAll('.discountType').forEach(el=>el.onchange=()=>{state.cart[el.dataset.i].discount_type=el.value;renderScannerCart(m)});
-  box.querySelectorAll('.discountValue').forEach(el=>el.oninput=()=>{state.cart[el.dataset.i].discount_value=Math.max(0,+el.value||0);renderScannerCart(m)});
+  box.querySelectorAll('.discountType').forEach(el=>el.onchange=()=>{state.cart[el.dataset.i].discount_type=el.value;updateTotals()});
+  box.querySelectorAll('.discountValue').forEach(el=>{
+    el.addEventListener('focus',()=>{if(el.value==='0'||el.value==='0,00'||el.value==='0.00')requestAnimationFrame(()=>el.select())});
+    el.addEventListener('input',()=>{
+      const cleaned=el.value.replace(',', '.').replace(/[^0-9.]/g,'').replace(/(\..*)\./g,'$1');
+      if(el.value!==cleaned.replace('.', el.value.includes(',')?',':'.')){const useComma=el.value.includes(',');el.value=useComma?cleaned.replace('.',','):cleaned}
+      state.cart[el.dataset.i].discount_value=cleaned===''?0:Math.max(0,Number(cleaned)||0);
+      updateTotals();
+    });
+    el.addEventListener('blur',()=>{if(el.value.trim()==='')el.value='0'});
+  });
   box.querySelectorAll('.remove').forEach(el=>el.onclick=()=>{state.cart.splice(el.dataset.i,1);renderScannerCart(m)});
   box.querySelector('#clearCart')?.addEventListener('click',()=>{state.cart=[];renderScannerCart(m)});
   box.querySelector('#checkout').onclick=()=>checkout(m);
