@@ -204,14 +204,34 @@ function renderScannerCart(m){
   box.querySelectorAll('.qty').forEach(el=>el.onchange=()=>{state.cart[el.dataset.i].quantity=Math.max(1,+el.value||1);renderScannerCart(m)});
   box.querySelectorAll('.discountType').forEach(el=>el.onchange=()=>{state.cart[el.dataset.i].discount_type=el.value;updateTotals()});
   box.querySelectorAll('.discountValue').forEach(el=>{
-    el.addEventListener('focus',()=>{if(el.value==='0'||el.value==='0,00'||el.value==='0.00')requestAnimationFrame(()=>el.select())});
+    // Su iPhone non riscriviamo mai il valore dell'input durante la digitazione:
+    // farlo sposta il cursore e può chiudere la tastiera dopo ogni cifra.
+    const clearInitialZero=()=>{
+      if(el.dataset.zeroCleared==='1')return;
+      if(['0','0,00','0.00'].includes(el.value.trim())){
+        el.value='';
+        el.dataset.zeroCleared='1';
+      }
+    };
+    el.addEventListener('pointerdown',clearInitialZero);
+    el.addEventListener('focus',clearInitialZero);
     el.addEventListener('input',()=>{
-      const cleaned=el.value.replace(',', '.').replace(/[^0-9.]/g,'').replace(/(\..*)\./g,'$1');
-      if(el.value!==cleaned.replace('.', el.value.includes(',')?',':'.')){const useComma=el.value.includes(',');el.value=useComma?cleaned.replace('.',','):cleaned}
-      state.cart[el.dataset.i].discount_value=cleaned===''?0:Math.max(0,Number(cleaned)||0);
+      // Manteniamo la stringa digitata intatta per non alterare focus e posizione del cursore.
+      const raw=el.value.trim();
+      const normalized=raw.replace(',', '.');
+      const valid=/^(?:\d+)?(?:\.\d*)?$/.test(normalized);
+      if(!valid)return;
+      state.cart[el.dataset.i].discount_value=normalized===''?0:Math.max(0,Number(normalized)||0);
       updateTotals();
     });
-    el.addEventListener('blur',()=>{if(el.value.trim()==='')el.value='0'});
+    el.addEventListener('blur',()=>{
+      const normalized=el.value.trim().replace(',', '.');
+      const value=normalized===''?0:Math.max(0,Number(normalized)||0);
+      state.cart[el.dataset.i].discount_value=value;
+      el.value=String(value).replace('.', ',');
+      delete el.dataset.zeroCleared;
+      updateTotals();
+    });
   });
   box.querySelectorAll('.remove').forEach(el=>el.onclick=()=>{state.cart.splice(el.dataset.i,1);renderScannerCart(m)});
   box.querySelector('#clearCart')?.addEventListener('click',()=>{state.cart=[];renderScannerCart(m)});
